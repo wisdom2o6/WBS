@@ -1,0 +1,17 @@
+# IDE / OS
+.idea/
+.vscode/
+*.DS_Store
+
+# Backend (Spring Boot / Maven)
+backend/target/
+backend/.classpath
+backend/.project
+backend/.settings/
+backend/*.iml
+
+# Frontend (React / Node)
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/*.log
