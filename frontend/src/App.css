@@ -1,54 +1,57 @@
 
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  font-family: Arial, sans-serif;
-  background: #f1f5f9;
-}
-
-.app {
-  min-height: 100vh;
-  padding: 24px;
-}
-
-.toolbar {
+.drawing-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
 }
 
-.toolbar h1 {
-  margin: 0 0 6px;
-  color: #0f172a;
-}
-
-.toolbar p {
-  margin: 0;
-  color: #64748b;
-}
-
-.toolbar button {
-  padding: 10px 16px;
-  border: none;
+.drawing-toolbar button {
+  padding: 9px 14px;
+  border: 1px solid #cbd5e1;
   border-radius: 8px;
-  background: #2563eb;
-  color: white;
+  background: white;
+  color: #0f172a;
   cursor: pointer;
 }
 
-.toolbar button:hover {
-  background: #1d4ed8;
+.drawing-toolbar button:hover {
+  background: #f1f5f9;
 }
 
-.canvas-container {
-  overflow: hidden;
+.drawing-toolbar button.tool-active {
+  background: #2563eb;
+  color: white;
+  border-color: #2563eb;
+}
+
+.drawing-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+}
+
+.drawing-toolbar input[type="color"] {
+  width: 42px;
+  height: 34px;
+  padding: 2px;
   border: 1px solid #cbd5e1;
-  border-radius: 12px;
-  background: white;
-  box-shadow: 0 4px 16px #0f172a0d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.drawing-toolbar input[type="range"] {
+  width: 120px;
+  cursor: pointer;
+}
+
+.toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

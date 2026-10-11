@@ -1,0 +1,118 @@
+
+package com.wisdom.wbs.controller;
+
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+
+import com.wisdom.wbs.entity.WhiteboardState;
+import com.wisdom.wbs.repository.WhiteboardStateRepository;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDateTime;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/rooms")
+@CrossOrigin(origins = "http://localhost:5173")
+public class WhiteboardStateController {
+
+    private final WhiteboardStateRepository repository;
+    private final ObjectMapper objectMapper;
+
+    public WhiteboardStateController(
+            WhiteboardStateRepository repository,
+            ObjectMapper objectMapper) {
+        this.repository = repository;
+        this.objectMapper = objectMapper;
+    }
+
+    private boolean validRoomId(String roomId) {
+        return roomId != null
+                && roomId.matches("[a-zA-Z0-9_-]{1,50}");
+    }
+
+    @GetMapping("/{roomId}/state")
+    public ResponseEntity<?> loadState(@PathVariable String roomId) {
+        if (!validRoomId(roomId)) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Invalid room ID"));
+        }
+
+        return repository.findById(roomId)
+                .map(state -> {
+                    try {
+                        JsonNode data =
+                                objectMapper.readTree(state.getData());
+
+                        return ResponseEntity.ok(Map.of(
+                                "roomId", state.getRoomId(),
+                                "data", data,
+                                "updatedAt", state.getUpdatedAt()
+                        ));
+                    } catch (Exception e) {
+                        return ResponseEntity
+                                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                                .body(Map.of("error",
+                                        "Cannot read saved whiteboard"));
+                    }
+                })
+                .orElseGet(() -> ResponseEntity.ok(Map.of(
+                        "roomId", roomId,
+                        "data", Map.of("lines", new Object[0]),
+                        "updatedAt", ""
+                )));
+    }
+
+    @PutMapping(
+            value = "/{roomId}/state",
+            consumes = MediaType.APPLICATION_JSON_VALUE
+    )
+    public ResponseEntity<?> saveState(
+            @PathVariable String roomId,
+            @RequestBody JsonNode body) {
+
+        if (!validRoomId(roomId)) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Invalid room ID"));
+        }
+
+        if (body == null || !body.isObject()
+                || !body.has("lines")
+                || !body.get("lines").isArray()) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Expected a lines array"));
+        }
+
+        if (body.get("lines").size() > 10000) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Too many strokes"));
+        }
+
+        try {
+            String json = objectMapper.writeValueAsString(body);
+
+            WhiteboardState state = repository.findById(roomId)
+                    .orElseGet(() -> new WhiteboardState(roomId, json));
+
+            state.setData(json);
+            state.setUpdatedAt(LocalDateTime.now());
+
+            repository.save(state);
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Whiteboard saved",
+                    "roomId", roomId,
+                    "updatedAt", state.getUpdatedAt()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity
+                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Cannot save whiteboard"));
+        }
+    }
+}
