@@ -2,6 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Client } from "@stomp/stompjs";
 import { Stage, Layer, Line } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
+import type { Participant, PresenceUpdateEvent } from "../types/presence";
+import type { CursorEvent } from "../types/cursor";
+import { ParticipantsPanel } from "./ParticipantsPanel";
+import { LiveCursorsLayer } from "./LiveCursorsLayer";
+import { UserNameModal } from "./UserNameModal";
 
 type DrawEvent = {
   roomId: string;
@@ -27,6 +32,7 @@ type SavedState = {
       width: number;
     }>;
   };
+  roomVersion?: number;
   updatedAt: string;
 };
 
@@ -51,12 +57,25 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const [storageStatus, setStorageStatus] = useState("Chưa tải dữ liệu");
   const [copied, setCopied] = useState(false);
 
+  const [displayName, setDisplayName] = useState<string>(() => {
+    return sessionStorage.getItem("wbs_display_name") || "";
+  });
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [remoteCursors, setRemoteCursors] = useState<Map<string, CursorEvent>>(new Map());
+
   const clientRef = useRef<Client | null>(null);
   const currentStrokeIdRef = useRef<string | null>(null);
   const currentPointsRef = useRef<number[]>([]);
   const roomVersionRef = useRef(0);
+  const lastCursorSendTimeRef = useRef(0);
+  const lastCursorPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
+
+  const handleDisplayNameSubmit = (name: string) => {
+    sessionStorage.setItem("wbs_display_name", name);
+    setDisplayName(name);
+  };
 
   // Gửi trạng thái bảng vẽ hiện tại xuống backend.
   const saveLines = useCallback(
@@ -103,8 +122,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         throw new Error("Dữ liệu bảng vẽ không hợp lệ");
       }
 
+      if (typeof result.roomVersion === "number") {
+        roomVersionRef.current = result.roomVersion;
+      }
+
       // Không khôi phục dữ liệu cũ nếu bảng đã bị xóa trong lúc tải.
-      if (versionAtStart !== roomVersionRef.current) {
+      if (versionAtStart !== roomVersionRef.current && result.roomVersion === undefined) {
         return;
       }
 
@@ -151,12 +174,76 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   }, [apiStateUrl, roomId]);
 
   useEffect(() => {
+    if (!displayName) return;
+
     const client = new Client({
       brokerURL: "ws://localhost:8080/ws",
       reconnectDelay: 3000,
 
       onConnect: () => {
         setConnected(true);
+
+        // Kênh presence cho phòng
+        client.subscribe(`/topic/rooms/${roomId}/presence`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as PresenceUpdateEvent;
+            if (
+              event &&
+              event.type === "PRESENCE_UPDATE" &&
+              Array.isArray(event.participants)
+            ) {
+              setParticipants(event.participants);
+              const activeSessionIds = new Set(
+                event.participants.map((p) => p.sessionId)
+              );
+              setRemoteCursors((prev) => {
+                let changed = false;
+                const next = new Map(prev);
+                for (const sessionId of next.keys()) {
+                  if (!activeSessionIds.has(sessionId)) {
+                    next.delete(sessionId);
+                    changed = true;
+                  }
+                }
+                return changed ? next : prev;
+              });
+            }
+          } catch (error) {
+            console.error("Lỗi nhận presence:", error);
+          }
+        });
+
+        // Đăng ký tham gia phòng
+        client.publish({
+          destination: `/app/rooms/${roomId}/join`,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ displayName }),
+        });
+
+        // Kênh cursor cho từng phòng
+        client.subscribe(`/topic/rooms/${roomId}/cursor`, (frame) => {
+          try {
+            const cursor = JSON.parse(frame.body) as CursorEvent;
+            if (
+              !cursor ||
+              cursor.roomId !== roomId ||
+              typeof cursor.x !== "number" ||
+              typeof cursor.y !== "number" ||
+              !cursor.sessionId ||
+              cursor.displayName === displayName
+            ) {
+              return;
+            }
+
+            setRemoteCursors((prev) => {
+              const next = new Map(prev);
+              next.set(cursor.sessionId, { ...cursor, lastUpdated: Date.now() });
+              return next;
+            });
+          } catch (error) {
+            console.error("Lỗi nhận cursor:", error);
+          }
+        });
 
         // Kênh riêng cho từng phòng
         client.subscribe(`/topic/rooms/${roomId}/draw`, (frame) => {
@@ -232,7 +319,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         void loadLines();
       },
 
-      onWebSocketClose: () => setConnected(false),
+      onWebSocketClose: () => {
+        setConnected(false);
+        setParticipants([]);
+        setRemoteCursors(new Map());
+      },
 
       onStompError: (frame) => {
         console.error("STOMP error:", frame.headers.message);
@@ -243,10 +334,68 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     void client.activate();
 
     return () => {
+      if (client.connected) {
+        try {
+          client.publish({
+            destination: `/app/rooms/${roomId}/leave`,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          });
+        } catch {
+          // ignore error when connection is closing
+        }
+      }
       clientRef.current = null;
       void client.deactivate();
     };
-  }, [roomId, loadLines, saveLines]);
+  }, [roomId, displayName, loadLines, saveLines]);
+
+  // Tự động loại bỏ cursor mất tín hiệu quá 5 giây
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setRemoteCursors((prev) => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [sessionId, cursor] of next.entries()) {
+          if (cursor.lastUpdated && now - cursor.lastUpdated > 5000) {
+            next.delete(sessionId);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 3000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  const sendCursorPosition = useCallback(
+    (x: number, y: number) => {
+      const client = clientRef.current;
+      if (!client?.connected) return;
+
+      const now = performance.now();
+      if (now - lastCursorSendTimeRef.current < 40) {
+        return;
+      }
+
+      const last = lastCursorPosRef.current;
+      if (last && Math.hypot(x - last.x, y - last.y) < 2) {
+        return;
+      }
+
+      lastCursorSendTimeRef.current = now;
+      lastCursorPosRef.current = { x, y };
+
+      client.publish({
+        destination: `/app/rooms/${roomId}/cursor`,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ x, y }),
+      });
+    },
+    [roomId]
+  );
 
   const publishStroke = useCallback(
     (points: number[]) => {
@@ -302,12 +451,24 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   };
 
   const handleMouseMove = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
-    if (!isDrawing || !currentStrokeIdRef.current) return;
-
     const point = e.target.getStage()?.getPointerPosition();
     if (!point) return;
 
-    const points = [...currentPointsRef.current, point.x, point.y];
+    sendCursorPosition(point.x, point.y);
+
+    if (!isDrawing || !currentStrokeIdRef.current) return;
+
+    // Giảm thiểu lưu lượng và tối ưu cộng tác đồng thời: bỏ qua các điểm di chuyển quá nhỏ (< 2px)
+    const pointsArray = currentPointsRef.current;
+    if (pointsArray.length >= 2) {
+      const lastX = pointsArray[pointsArray.length - 2];
+      const lastY = pointsArray[pointsArray.length - 1];
+      if (Math.hypot(point.x - lastX, point.y - lastY) < 2) {
+        return;
+      }
+    }
+
+    const points = [...pointsArray, point.x, point.y];
     currentPointsRef.current = points;
 
     const strokeId = currentStrokeIdRef.current;
@@ -366,11 +527,31 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     });
   };
 
+  const handleLeave = () => {
+    const client = clientRef.current;
+    if (client?.connected) {
+      try {
+        client.publish({
+          destination: `/app/rooms/${roomId}/leave`,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        });
+      } catch {
+        // ignore
+      }
+    }
+    onLeaveRoom();
+  };
+
   const handleCopyRoomId = () => {
     navigator.clipboard.writeText(roomId);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
   };
+
+  if (!displayName) {
+    return <UserNameModal onSubmit={handleDisplayNameSubmit} />;
+  }
 
   return (
     <main className="app">
@@ -390,7 +571,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             <button
               type="button"
               className="btn-leave-room"
-              onClick={onLeaveRoom}
+              onClick={handleLeave}
               title="Quay về sảnh chờ"
             >
               🚪 Rời phòng
@@ -457,31 +638,38 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       </section>
 
       <section className="canvas-container">
-        <Stage
-          width={Math.max(300, window.innerWidth - 80)}
-          height={Math.max(300, window.innerHeight - 260)}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={stopDrawing}
-          onMouseLeave={stopDrawing}
-          onTouchStart={handleMouseDown}
-          onTouchMove={handleMouseMove}
-          onTouchEnd={stopDrawing}
-        >
-          <Layer>
-            {lines.map((line) => (
-              <Line
-                key={line.strokeId}
-                points={line.points}
-                stroke={line.color}
-                strokeWidth={line.width}
-                lineCap="round"
-                lineJoin="round"
-                tension={0.3}
-              />
-            ))}
-          </Layer>
-        </Stage>
+        <div className="canvas-wrapper">
+          <Stage
+            width={Math.max(300, window.innerWidth - 80)}
+            height={Math.max(300, window.innerHeight - 260)}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={stopDrawing}
+            onMouseLeave={stopDrawing}
+            onTouchStart={handleMouseDown}
+            onTouchMove={handleMouseMove}
+            onTouchEnd={stopDrawing}
+          >
+            <Layer>
+              {lines.map((line) => (
+                <Line
+                  key={line.strokeId}
+                  points={line.points}
+                  stroke={line.color}
+                  strokeWidth={line.width}
+                  lineCap="round"
+                  lineJoin="round"
+                  tension={0.3}
+                />
+              ))}
+            </Layer>
+            <LiveCursorsLayer cursors={Array.from(remoteCursors.values())} />
+          </Stage>
+          <ParticipantsPanel
+            participants={participants}
+            currentUserDisplayName={displayName}
+          />
+        </div>
       </section>
     </main>
   );

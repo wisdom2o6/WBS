@@ -43,7 +43,7 @@ public class DrawController {
                 && roomId.matches("^[a-zA-Z0-9_-]{1,50}$");
     }
 
-    private long getRoomVersion(String roomId) {
+    public long getRoomVersion(String roomId) {
         return roomVersions
                 .computeIfAbsent(roomId, id -> new AtomicLong(0))
                 .get();

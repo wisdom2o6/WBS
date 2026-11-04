@@ -23,14 +23,17 @@ public class WhiteboardStateController {
     private final WhiteboardStateRepository repository;
     private final WhiteboardRoomService roomService;
     private final ObjectMapper objectMapper;
+    private final DrawController drawController;
 
     public WhiteboardStateController(
             WhiteboardStateRepository repository,
             WhiteboardRoomService roomService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            DrawController drawController) {
         this.repository = repository;
         this.roomService = roomService;
         this.objectMapper = objectMapper;
+        this.drawController = drawController;
     }
 
     private boolean validRoomId(String roomId) {
@@ -50,6 +53,8 @@ public class WhiteboardStateController {
                     .body(Map.of("error", "Room not found"));
         }
 
+        long roomVersion = drawController.getRoomVersion(roomId);
+
         return repository.findById(roomId)
                 .map(state -> {
                     try {
@@ -59,6 +64,7 @@ public class WhiteboardStateController {
                         return ResponseEntity.ok(Map.of(
                                 "roomId", state.getRoomId(),
                                 "data", data,
+                                "roomVersion", roomVersion,
                                 "updatedAt", state.getUpdatedAt()
                         ));
                     } catch (Exception e) {
@@ -71,6 +77,7 @@ public class WhiteboardStateController {
                 .orElseGet(() -> ResponseEntity.ok(Map.of(
                         "roomId", roomId,
                         "data", Map.of("lines", new Object[0]),
+                        "roomVersion", roomVersion,
                         "updatedAt", ""
                 )));
     }
