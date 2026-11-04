@@ -1,12 +1,11 @@
-
 package com.wisdom.wbs.controller;
-
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import com.wisdom.wbs.entity.WhiteboardState;
 import com.wisdom.wbs.repository.WhiteboardStateRepository;
+import com.wisdom.wbs.service.WhiteboardRoomService;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -22,18 +21,21 @@ import java.util.Map;
 public class WhiteboardStateController {
 
     private final WhiteboardStateRepository repository;
+    private final WhiteboardRoomService roomService;
     private final ObjectMapper objectMapper;
 
     public WhiteboardStateController(
             WhiteboardStateRepository repository,
+            WhiteboardRoomService roomService,
             ObjectMapper objectMapper) {
         this.repository = repository;
+        this.roomService = roomService;
         this.objectMapper = objectMapper;
     }
 
     private boolean validRoomId(String roomId) {
         return roomId != null
-                && roomId.matches("[a-zA-Z0-9_-]{1,50}");
+                && roomId.matches("^[a-zA-Z0-9_-]{1,50}$");
     }
 
     @GetMapping("/{roomId}/state")
@@ -41,6 +43,11 @@ public class WhiteboardStateController {
         if (!validRoomId(roomId)) {
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "Invalid room ID"));
+        }
+
+        if (!roomService.roomExists(roomId)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "Room not found"));
         }
 
         return repository.findById(roomId)
@@ -81,6 +88,11 @@ public class WhiteboardStateController {
                     .body(Map.of("error", "Invalid room ID"));
         }
 
+        if (!roomService.roomExists(roomId)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "Room not found"));
+        }
+
         if (body == null || !body.isObject()
                 || !body.has("lines")
                 || !body.get("lines").isArray()) {
@@ -105,9 +117,9 @@ public class WhiteboardStateController {
             repository.save(state);
 
             return ResponseEntity.ok(Map.of(
-                    "message", "Whiteboard saved",
-                    "roomId", roomId,
-                    "updatedAt", state.getUpdatedAt()
+                "message", "Whiteboard saved",
+                "roomId", roomId,
+                "updatedAt", state.getUpdatedAt()
             ));
         } catch (Exception e) {
             return ResponseEntity

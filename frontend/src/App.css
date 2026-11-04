@@ -1,23 +1,138 @@
+/* Base Layout */
+.app {
+  padding: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
 
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.toolbar-info h1 {
+  margin: 0 0 6px 0;
+  font-size: 1.4rem;
+  color: #0f172a;
+}
+
+.toolbar-info p {
+  margin: 4px 0 0 0;
+  font-size: 0.9rem;
+  color: #64748b;
+}
+
+.room-badge-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  font-size: 0.95rem;
+}
+
+.room-code-display {
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 1.05rem;
+  border: 1px solid #bfdbfe;
+}
+
+.btn-copy-sm, .btn-leave-room {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  transition: all 0.2s ease;
+}
+
+.btn-copy-sm:hover {
+  background: #e2e8f0;
+}
+
+.btn-leave-room {
+  color: #dc2626;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.btn-leave-room:hover {
+  background: #fee2e2;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-action {
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #0f172a;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-action:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.btn-danger {
+  color: #b91c1c;
+  border-color: #fca5a5;
+  background: #fff5f5;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Drawing Toolbar */
 .drawing-toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
-  padding: 12px;
+  gap: 14px;
+  padding: 12px 18px;
   margin-bottom: 16px;
-  background: white;
-  border: 1px solid #cbd5e1;
-  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .drawing-toolbar button {
-  padding: 9px 14px;
+  padding: 8px 14px;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   background: white;
   color: #0f172a;
+  font-size: 0.9rem;
   cursor: pointer;
+  transition: all 0.2s;
 }
 
 .drawing-toolbar button:hover {
@@ -35,11 +150,12 @@
   align-items: center;
   gap: 8px;
   color: #334155;
+  font-size: 0.9rem;
 }
 
 .drawing-toolbar input[type="color"] {
-  width: 42px;
-  height: 34px;
+  width: 38px;
+  height: 32px;
   padding: 2px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -51,7 +167,197 @@
   cursor: pointer;
 }
 
-.toolbar button:disabled {
-  opacity: 0.5;
+/* Canvas Stage */
+.canvas-container {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Room Lobby Styling */
+.lobby-container {
+  max-width: 860px;
+  margin: 60px auto;
+  padding: 32px 24px;
+  text-align: center;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.loading-container {
+  font-size: 1.1rem;
+  color: #64748b;
+  margin-top: 120px;
+}
+
+.lobby-header h1 {
+  font-size: 2.2rem;
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+.lobby-header p {
+  font-size: 1.1rem;
+  color: #64748b;
+  margin-bottom: 36px;
+}
+
+.lobby-alert {
+  padding: 12px 18px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  font-size: 0.95rem;
+}
+
+.lobby-error {
+  background-color: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+}
+
+.lobby-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 28px;
+  text-align: left;
+}
+
+.lobby-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 28px 24px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  display: flex;
+  flex-direction: column;
+}
+
+.card-icon {
+  font-size: 2rem;
+  margin-bottom: 12px;
+}
+
+.lobby-card h2 {
+  font-size: 1.4rem;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.lobby-card p {
+  color: #64748b;
+  font-size: 0.95rem;
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.lobby-btn {
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.btn-primary {
+  background-color: #2563eb;
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #1d4ed8;
+}
+
+.btn-secondary {
+  background-color: #0f172a;
+  color: white;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: #1e293b;
+}
+
+.lobby-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
+}
+
+.created-room-box {
+  margin-top: 20px;
+  padding: 16px;
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+}
+
+.created-room-box p {
+  color: #166534;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.room-code-badge {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #ffffff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #86efac;
+  margin-bottom: 12px;
+}
+
+.room-code-badge strong {
+  font-family: monospace;
+  font-size: 1.15rem;
+  color: #15803d;
+}
+
+.btn-copy {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  color: #166534;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.btn-copy:hover {
+  background: #dcfce7;
+}
+
+.btn-join-created {
+  background-color: #16a34a;
+  color: white;
+  margin-top: 4px;
+}
+
+.btn-join-created:hover {
+  background-color: #15803d;
+}
+
+.join-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.input-group input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.input-group input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }

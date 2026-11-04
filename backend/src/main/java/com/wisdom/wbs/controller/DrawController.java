@@ -1,9 +1,9 @@
-
 package com.wisdom.wbs.controller;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.wisdom.wbs.service.WhiteboardRoomService;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
@@ -12,13 +12,17 @@ import org.springframework.stereotype.Controller;
 public class DrawController {
 
     private final SimpMessagingTemplate messagingTemplate;
+    private final WhiteboardRoomService roomService;
 
     // Phiên bản hiện tại của từng phòng.
     private final ConcurrentHashMap<String, AtomicLong> roomVersions =
             new ConcurrentHashMap<>();
 
-    public DrawController(SimpMessagingTemplate messagingTemplate) {
+    public DrawController(
+            SimpMessagingTemplate messagingTemplate,
+            WhiteboardRoomService roomService) {
         this.messagingTemplate = messagingTemplate;
+        this.roomService = roomService;
     }
 
     public record DrawEvent(
@@ -36,7 +40,7 @@ public class DrawController {
 
     private boolean validRoomId(String roomId) {
         return roomId != null
-                && roomId.matches("[a-zA-Z0-9_-]{1,50}");
+                && roomId.matches("^[a-zA-Z0-9_-]{1,50}$");
     }
 
     private long getRoomVersion(String roomId) {
@@ -50,13 +54,13 @@ public class DrawController {
         if (event == null
                 || !validRoomId(event.roomId())
                 || event.strokeId() == null
-                || !event.strokeId().matches("[a-zA-Z0-9_-]{1,100}")
+                || !event.strokeId().matches("^[a-zA-Z0-9_-]{1,100}$")
                 || event.points() == null
                 || event.points().length < 2
                 || event.points().length > 20000
                 || event.points().length % 2 != 0
                 || event.color() == null
-                || !event.color().matches("#[0-9a-fA-F]{6}")
+                || !event.color().matches("^#[0-9a-fA-F]{6}$")
                 || !Double.isFinite(event.width())
                 || event.width() < 1
                 || event.width() > 50) {
@@ -67,6 +71,11 @@ public class DrawController {
             if (!Double.isFinite(point) || Math.abs(point) > 100000) {
                 return;
             }
+        }
+
+        // Xác thực phòng có tồn tại trong hệ thống trước khi broadcast
+        if (!roomService.roomExists(event.roomId())) {
+            return;
         }
 
         long currentVersion = getRoomVersion(event.roomId());
@@ -84,6 +93,11 @@ public class DrawController {
     @MessageMapping("/clear")
     public void clear(ClearRequest request) {
         if (request == null || !validRoomId(request.roomId())) {
+            return;
+        }
+
+        // Xác thực phòng có tồn tại trong hệ thống trước khi broadcast
+        if (!roomService.roomExists(request.roomId())) {
             return;
         }
 
