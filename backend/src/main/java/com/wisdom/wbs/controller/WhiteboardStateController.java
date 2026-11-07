@@ -103,13 +103,15 @@ public class WhiteboardStateController {
         if (body == null || !body.isObject()
                 || !body.has("lines")
                 || !body.get("lines").isArray()
-                || (body.has("shapes") && !body.get("shapes").isArray())) {
+                || (body.has("shapes") && !body.get("shapes").isArray())
+                || (body.has("texts") && !body.get("texts").isArray())) {
             return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Expected lines and shapes arrays"));
+                    .body(Map.of("error", "Expected lines, shapes, and texts arrays"));
         }
 
         int shapeCount = body.has("shapes") ? body.get("shapes").size() : 0;
-        if (body.get("lines").size() + shapeCount > 10000) {
+        int textCount = body.has("texts") ? body.get("texts").size() : 0;
+        if (body.get("lines").size() + shapeCount + textCount > 10000) {
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "Too many drawing elements"));
         }

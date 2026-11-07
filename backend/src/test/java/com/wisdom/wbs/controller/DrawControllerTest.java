@@ -7,6 +7,8 @@ import com.wisdom.wbs.controller.DrawController.UndoRedoEvent;
 import com.wisdom.wbs.controller.DrawController.UndoRedoRequest;
 import com.wisdom.wbs.controller.DrawController.ShapeEvent;
 import com.wisdom.wbs.controller.DrawController.ShapeUndoRedoEvent;
+import com.wisdom.wbs.controller.DrawController.TextEvent;
+import com.wisdom.wbs.controller.DrawController.TextUndoRedoEvent;
 import com.wisdom.wbs.service.WhiteboardRoomService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -226,5 +228,28 @@ class DrawControllerTest {
                 0, 0, 0, 0, 0, 0, 10, 10, 0,
                 "#2563eb", 3, 0), null);
         assertEquals(1, sentMessages.size());
+    }
+
+    @Test
+    void testTextIsBroadcastAndUndoRemovesIt() {
+        TextEvent text = new TextEvent(
+                "room1", "text-1", 10, 20, "Hello\nworld",
+                "#2563eb", 24, "Arial", "normal", "left", 0, false, 0);
+
+        controller.text(text, null);
+
+        assertEquals(1, sentMessages.size());
+        assertEquals("/topic/rooms/room1/text", sentMessages.get(0).destination());
+        assertEquals(text, sentMessages.get(0).payload());
+
+        sentMessages.clear();
+        controller.undo(new UndoRedoRequest("room1", "text-undo"), null);
+
+        assertEquals(1, sentMessages.size());
+        assertTrue(sentMessages.get(0).payload() instanceof TextUndoRedoEvent);
+        TextUndoRedoEvent undo = (TextUndoRedoEvent) sentMessages.get(0).payload();
+        assertEquals("UNDO", undo.action());
+        assertEquals("text-1", undo.textId());
+        assertTrue(undo.deleted());
     }
 }

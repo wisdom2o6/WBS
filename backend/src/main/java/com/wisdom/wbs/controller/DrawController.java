@@ -69,6 +69,22 @@ public class DrawController {
         long roomVersion
     ) {}
 
+    public record TextEvent(
+        String roomId,
+        String textId,
+        double x,
+        double y,
+        String text,
+        String color,
+        double fontSize,
+        String fontFamily,
+        String fontStyle,
+        String align,
+        double width,
+        boolean deleted,
+        long roomVersion
+    ) {}
+
     public record ClearRequest(String roomId) {}
 
     public record ClearEvent(String roomId, long roomVersion) {}
@@ -108,13 +124,32 @@ public class DrawController {
             long roomVersion
     ) {}
 
+    public record TextUndoRedoEvent(
+            String action,
+            String roomId,
+            String textId,
+            double x,
+            double y,
+            String text,
+            String color,
+            double fontSize,
+            String fontFamily,
+            String fontStyle,
+            String align,
+            double width,
+            boolean deleted,
+            long roomVersion
+    ) {}
+
     private record Operation(
             String elementType,
             String strokeId,
             double[] points,
             String color,
             double width,
-            ShapeEvent shape
+            ShapeEvent shape,
+            TextEvent text,
+            TextEvent previousText
     ) {}
 
     private static final class RoomHistory {
@@ -257,6 +292,65 @@ public class DrawController {
                 "/topic/rooms/" + event.roomId() + "/shape", event);
     }
 
+    @MessageMapping("/text")
+    public void text(TextEvent event, SimpMessageHeaderAccessor headerAccessor) {
+        if (event == null
+                || !validRoomId(event.roomId())
+                || event.textId() == null
+                || !event.textId().matches("^[a-zA-Z0-9_-]{1,100}$")
+                || event.text() == null
+                || (!event.deleted() && event.text().isBlank())
+                || event.text().length() > 10000
+                || event.color() == null
+                || !event.color().matches("^#[0-9a-fA-F]{6}$")
+                || !Double.isFinite(event.x())
+                || !Double.isFinite(event.y())
+                || !Double.isFinite(event.fontSize())
+                || event.fontSize() < 8
+                || event.fontSize() > 200
+                || !Double.isFinite(event.width())
+                || event.width() < 0
+                || event.width() > 100000
+                || Math.abs(event.x()) > 100000
+                || Math.abs(event.y()) > 100000
+                || !validTextAttribute(event.fontFamily(), "^[a-zA-Z0-9 ,_-]{1,100}$")
+                || !validTextAttribute(event.fontStyle(), "^(normal|bold|italic)$")
+                || !validTextAttribute(event.align(), "^(left|center|right)$")) {
+            return;
+        }
+        if (!roomService.roomExists(event.roomId())) {
+            return;
+        }
+        String participantId = participantId(event.roomId(), headerAccessor);
+        if (participantId == null || event.roomVersion() != getRoomVersion(event.roomId())) {
+            return;
+        }
+
+        RoomHistory history = roomHistories.computeIfAbsent(
+                event.roomId(), id -> new RoomHistory());
+        synchronized (history) {
+            java.util.LinkedHashMap<String, Operation> active =
+                    history.activeByParticipant.computeIfAbsent(
+                            participantId, id -> new java.util.LinkedHashMap<>());
+            if (active.containsKey(event.textId())) {
+                Operation previous = active.get(event.textId());
+                active.put(event.textId(), operationOf(event, previous == null ? null : previous.text()));
+            } else {
+                for (java.util.ArrayDeque<Operation> redo : history.redoByParticipant.values()) {
+                    if (redo.stream().anyMatch(op -> event.textId().equals(op.strokeId()))) {
+                        return;
+                    }
+                }
+                active.put(event.textId(), operationOf(event));
+                history.redoByParticipant
+                        .computeIfAbsent(participantId, id -> new java.util.ArrayDeque<>())
+                        .clear();
+            }
+        }
+        messagingTemplate.convertAndSend(
+                "/topic/rooms/" + event.roomId() + "/text", event);
+    }
+
     public void clear(ClearRequest request) {
         clear(request, null);
     }
@@ -390,6 +484,26 @@ public class DrawController {
                                 shape.radius(), shape.color(), shape.strokeWidth(), newVersion
                         )
                 );
+            } else if ("TEXT".equals(operation.elementType())) {
+                TextEvent text = redo ? operation.text() : operation.previousText();
+                messagingTemplate.convertAndSend(
+                        "/topic/rooms/" + request.roomId() + "/undo",
+                        new TextUndoRedoEvent(
+                                redo ? "REDO" : "UNDO",
+                                request.roomId(),
+                                operation.strokeId(),
+                                text == null ? 0 : text.x(),
+                                text == null ? 0 : text.y(),
+                                text == null ? "" : text.text(),
+                                text == null ? operation.color() : text.color(),
+                                text == null ? operation.width() : text.fontSize(),
+                                text == null ? "Arial" : text.fontFamily(),
+                                text == null ? "normal" : text.fontStyle(),
+                                text == null ? "left" : text.align(),
+                                text == null ? 0 : text.width(),
+                                text == null, newVersion
+                        )
+                );
             } else {
                 messagingTemplate.convertAndSend(
                         "/topic/rooms/" + request.roomId() + "/undo",
@@ -429,12 +543,26 @@ public class DrawController {
                 event.points().clone(),
                 event.color(),
                 event.width(),
+                null,
+                null,
                 null
         );
     }
 
     private Operation operationOf(ShapeEvent event) {
-        return new Operation("SHAPE", event.shapeId(), null, event.color(), event.strokeWidth(), event);
+        return new Operation("SHAPE", event.shapeId(), null, event.color(), event.strokeWidth(), event, null, null);
+    }
+
+    private Operation operationOf(TextEvent event) {
+        return operationOf(event, null);
+    }
+
+    private Operation operationOf(TextEvent event, TextEvent previousText) {
+        return new Operation("TEXT", event.textId(), null, event.color(), event.fontSize(), null, event, previousText);
+    }
+
+    private boolean validTextAttribute(String value, String pattern) {
+        return value != null && value.matches(pattern);
     }
 
     private boolean validGeometry(ShapeEvent event) {

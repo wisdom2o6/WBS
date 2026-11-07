@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Client } from "@stomp/stompjs";
-import { Stage, Layer, Line, Rect, Circle, Arrow } from "react-konva";
+import { Stage, Layer, Line, Rect, Circle, Arrow, Text } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
 import type { Participant, PresenceUpdateEvent } from "../types/presence";
 import type { CursorEvent } from "../types/cursor";
@@ -37,6 +37,22 @@ type ShapeEvent = {
   roomVersion: number;
 };
 
+type TextEvent = {
+  roomId: string;
+  textId: string;
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  fontSize: number;
+  fontFamily: string;
+  fontStyle: "normal" | "bold" | "italic";
+  align: "left" | "center" | "right";
+  width: number;
+  deleted?: boolean;
+  roomVersion: number;
+};
+
 type UndoRedoEvent = {
   action: "UNDO" | "REDO";
   roomId: string;
@@ -56,6 +72,13 @@ type UndoRedoEvent = {
   endY?: number;
   radius?: number;
   strokeWidth?: number;
+  textId?: string;
+  text?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  fontStyle?: TextEvent["fontStyle"];
+  align?: TextEvent["align"];
+  deleted?: boolean;
 };
 
 type ClearEvent = {
@@ -73,12 +96,13 @@ type SavedState = {
       width: number;
     }>;
     shapes?: Array<ShapeEvent>;
+    texts?: Array<TextEvent>;
   };
   roomVersion?: number;
   updatedAt: string;
 };
 
-type Tool = "pen" | "eraser" | "rectangle" | "circle" | "line" | "arrow";
+type Tool = "pen" | "eraser" | "rectangle" | "circle" | "line" | "arrow" | "text";
 
 interface WhiteboardCanvasProps {
   roomId: string;
@@ -91,16 +115,20 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 }) => {
   const [lines, setLines] = useState<DrawEvent[]>([]);
   const [shapes, setShapes] = useState<ShapeEvent[]>([]);
+  const [texts, setTexts] = useState<TextEvent[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [connected, setConnected] = useState(false);
   const [tool, setTool] = useState<Tool>("pen");
   const [color, setColor] = useState("#2563eb");
   const [width, setWidth] = useState(3);
+  const [fontSize, setFontSize] = useState(24);
   const [isSaving, setIsSaving] = useState(false);
   const [storageStatus, setStorageStatus] = useState("Chưa tải dữ liệu");
   const [copied, setCopied] = useState(false);
   const [undoCount, setUndoCount] = useState(0);
   const [redoCount, setRedoCount] = useState(0);
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [editingTextValue, setEditingTextValue] = useState("");
 
   const [displayName, setDisplayName] = useState<string>(() => {
     return sessionStorage.getItem("wbs_display_name") || "";
@@ -119,8 +147,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const redoStackRef = useRef<DrawEvent[]>([]);
   const shapeUndoStackRef = useRef<ShapeEvent[]>([]);
   const shapeRedoStackRef = useRef<ShapeEvent[]>([]);
+  const textUndoStackRef = useRef<TextEvent[]>([]);
+  const textRedoStackRef = useRef<TextEvent[]>([]);
   const linesRef = useRef<DrawEvent[]>([]);
   const shapesRef = useRef<ShapeEvent[]>([]);
+  const textsRef = useRef<TextEvent[]>([]);
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
@@ -146,6 +177,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             width: line.width,
           })),
           shapes: shapesRef.current.map(({ roomId: _roomId, ...shape }) => shape),
+          texts: textsRef.current.map(({ roomId: _roomId, ...text }) => text),
         }),
       });
 
@@ -220,6 +252,21 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           typeof shape.color === "string" && typeof shape.strokeWidth === "number"
         )
         .map((shape) => ({ ...shape, roomId, roomVersion: roomVersionRef.current }));
+      const restoredTexts: TextEvent[] = (result.data.texts ?? [])
+        .filter((text) =>
+          text && typeof text.textId === "string" && typeof text.text === "string" &&
+          text.text.length > 0 && typeof text.x === "number" && typeof text.y === "number" &&
+          typeof text.color === "string" && typeof text.fontSize === "number"
+        )
+        .map((text) => ({
+          ...text,
+          roomId,
+          fontFamily: text.fontFamily || "Arial",
+          fontStyle: text.fontStyle || "normal",
+          align: text.align || "left",
+          width: text.width || 0,
+          roomVersion: roomVersionRef.current,
+        }));
 
       // Giữ các nét vẽ realtime vừa nhận được trong lúc tải dữ liệu.
       setLines((previous) => {
@@ -245,8 +292,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         shapesRef.current = nextShapes;
         return nextShapes;
       });
+      setTexts((previous) => {
+        const merged = new Map<string, TextEvent>();
+        for (const text of restoredTexts) merged.set(text.textId, text);
+        for (const text of previous) merged.set(text.textId, text);
+        const nextTexts = Array.from(merged.values());
+        textsRef.current = nextTexts;
+        return nextTexts;
+      });
 
-      setStorageStatus(`Đã tải ${restoredLines.length} nét và ${restoredShapes.length} hình từ PostgreSQL`);
+      setStorageStatus(`Đã tải ${restoredLines.length} nét, ${restoredShapes.length} hình và ${restoredTexts.length} văn bản từ PostgreSQL`);
     } catch (error) {
       console.error("Lỗi tải bảng vẽ:", error);
       setStorageStatus("Không tải được dữ liệu đã lưu");
@@ -360,30 +415,67 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               return updated;
             });
 
-            client.subscribe(`/topic/rooms/${roomId}/shape`, (frame) => {
-              try {
-                const event = JSON.parse(frame.body) as ShapeEvent;
-                if (
-                  event.roomId !== roomId ||
-                  typeof event.shapeId !== "string" ||
-                  !["RECTANGLE", "CIRCLE", "LINE", "ARROW"].includes(event.type) ||
-                  !Number.isInteger(event.roomVersion) ||
-                  event.roomVersion !== roomVersionRef.current
-                ) return;
-                setShapes((previous) => {
-                  const next = [...previous];
-                  const index = next.findIndex((shape) => shape.shapeId === event.shapeId);
-                  if (index === -1) next.push(event);
-                  else next[index] = event;
-                  shapesRef.current = next;
-                  return next;
-                });
-              } catch (error) {
-                console.error("Lỗi nhận hình vẽ:", error);
-              }
-            });
           } catch (error) {
             console.error("Lỗi nhận nét vẽ:", error);
+          }
+        });
+
+        client.subscribe(`/topic/rooms/${roomId}/shape`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as ShapeEvent;
+            if (
+              event.roomId !== roomId ||
+              typeof event.shapeId !== "string" ||
+              !["RECTANGLE", "CIRCLE", "LINE", "ARROW"].includes(event.type) ||
+              !Number.isInteger(event.roomVersion) ||
+              event.roomVersion !== roomVersionRef.current
+            ) return;
+            setShapes((previous) => {
+              const next = [...previous];
+              const index = next.findIndex((shape) => shape.shapeId === event.shapeId);
+              if (index === -1) next.push(event);
+              else next[index] = event;
+              shapesRef.current = next;
+              return next;
+            });
+          } catch (error) {
+            console.error("Lỗi nhận hình vẽ:", error);
+          }
+        });
+
+        client.subscribe(`/topic/rooms/${roomId}/text`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as TextEvent;
+            if (
+              event.roomId !== roomId ||
+              typeof event.textId !== "string" ||
+              typeof event.text !== "string" ||
+              !Number.isInteger(event.roomVersion) ||
+              event.roomVersion !== roomVersionRef.current
+            ) return;
+            if (event.deleted) {
+              const next = textsRef.current.filter((text) => text.textId !== event.textId);
+              textsRef.current = next;
+              setTexts(next);
+              return;
+            }
+            const normalized: TextEvent = {
+              ...event,
+              fontFamily: event.fontFamily || "Arial",
+              fontStyle: event.fontStyle || "normal",
+              align: event.align || "left",
+              width: event.width || 0,
+            };
+            setTexts((previous) => {
+              const next = [...previous];
+              const index = next.findIndex((text) => text.textId === event.textId);
+              if (index === -1) next.push(normalized);
+              else next[index] = normalized;
+              textsRef.current = next;
+              return next;
+            });
+          } catch (error) {
+            console.error("Lỗi nhận văn bản:", error);
           }
         });
 
@@ -407,10 +499,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             setLines([]);
             shapesRef.current = [];
             setShapes([]);
+            textsRef.current = [];
+            setTexts([]);
             undoStackRef.current = [];
             redoStackRef.current = [];
             shapeUndoStackRef.current = [];
             shapeRedoStackRef.current = [];
+            textUndoStackRef.current = [];
+            textRedoStackRef.current = [];
             setUndoCount(0);
             setRedoCount(0);
 
@@ -436,8 +532,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             if (
               event.roomId !== roomId ||
               !["UNDO", "REDO"].includes(event.action) ||
-              (typeof event.shapeId !== "string" && typeof event.strokeId !== "string") ||
-              (typeof event.shapeId !== "string" && !Array.isArray(event.points)) ||
+              (typeof event.shapeId !== "string" && typeof event.textId !== "string" && typeof event.strokeId !== "string") ||
+              (typeof event.shapeId !== "string" && typeof event.textId !== "string" && !Array.isArray(event.points)) ||
               !Number.isInteger(event.roomVersion) ||
               event.roomVersion <= roomVersionRef.current
             ) {
@@ -445,6 +541,47 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             }
 
             roomVersionRef.current = event.roomVersion;
+            if (event.textId && typeof event.text === "string") {
+              const operation: TextEvent = {
+                roomId,
+                textId: event.textId,
+                x: event.x ?? 0,
+                y: event.y ?? 0,
+                text: event.text,
+                color: event.color,
+                fontSize: event.fontSize ?? 24,
+                fontFamily: event.fontFamily || "Arial",
+                fontStyle: event.fontStyle || "normal",
+                align: event.align || "left",
+                width: event.width ?? 0,
+                deleted: event.deleted,
+                roomVersion: event.roomVersion,
+              };
+              const nextTexts = event.deleted
+                ? textsRef.current.filter((text) => text.textId !== event.textId)
+                : [...textsRef.current.filter((text) => text.textId !== event.textId), operation];
+              if (event.action === "UNDO") {
+                const local = textUndoStackRef.current.find((text) => text.textId === event.textId);
+                if (local) {
+                  textUndoStackRef.current = textUndoStackRef.current.filter((text) => text.textId !== event.textId);
+                  textRedoStackRef.current.push(local);
+                }
+              } else {
+                const local = textRedoStackRef.current.find((text) => text.textId === event.textId);
+                if (local) {
+                  textRedoStackRef.current = textRedoStackRef.current.filter((text) => text.textId !== event.textId);
+                  textUndoStackRef.current.push(local);
+                }
+              }
+              textsRef.current = nextTexts;
+              setTexts(nextTexts);
+              setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+              setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
+              void persistLines(linesRef.current).catch((error) => {
+                console.error("Lỗi lưu trạng thái undo/redo:", error);
+              });
+              return;
+            }
             if (event.shapeId && event.type) {
               roomVersionRef.current = event.roomVersion;
               const operation: ShapeEvent = {
@@ -472,8 +609,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                   shapeUndoStackRef.current.push(local);
                 }
               }
-              setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
-              setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
+              setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+              setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
               shapesRef.current = nextShapes;
               setShapes(nextShapes);
               void persistLines(linesRef.current).catch((error) => {
@@ -498,8 +635,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               if (localIndex !== -1) {
                 const [localOperation] = undoStackRef.current.splice(localIndex, 1);
                 redoStackRef.current.push(localOperation);
-                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
-                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
+                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
               }
               nextLines = linesRef.current.filter(
                 (line) => line.strokeId !== event.strokeId
@@ -511,8 +648,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               if (localIndex !== -1) {
                 const [localOperation] = redoStackRef.current.splice(localIndex, 1);
                 undoStackRef.current.push(localOperation);
-                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
-                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
+                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
               }
               nextLines = linesRef.current.some(
                 (line) => line.strokeId === event.strokeId
@@ -576,6 +713,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   useEffect(() => {
     shapesRef.current = shapes;
   }, [shapes]);
+
+  useEffect(() => {
+    textsRef.current = texts;
+  }, [texts]);
 
   // Tự động loại bỏ cursor mất tín hiệu quá 5 giây
   useEffect(() => {
@@ -661,11 +802,109 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     });
   }, []);
 
+  const publishText = useCallback((text: TextEvent) => {
+    const client = clientRef.current;
+    if (!client?.connected) return;
+    client.publish({
+      destination: "/app/text",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(text),
+    });
+  }, []);
+
+  const commitTextEdit = useCallback(() => {
+    if (!editingTextId) return;
+    const existing = textsRef.current.find((text) => text.textId === editingTextId);
+    if (!existing) {
+      setEditingTextId(null);
+      return;
+    }
+    const value = editingTextValue.trim();
+    if (!value) {
+      const deleted: TextEvent = {
+        ...existing,
+        text: "",
+        deleted: true,
+        roomVersion: roomVersionRef.current,
+      };
+      textUndoStackRef.current.push(existing);
+      textRedoStackRef.current = [];
+      publishText(deleted);
+      textsRef.current = textsRef.current.filter((text) => text.textId !== editingTextId);
+      setTexts(textsRef.current);
+      setEditingTextId(null);
+      return;
+    }
+    const updated: TextEvent = {
+      ...existing,
+      text: editingTextValue,
+      deleted: false,
+      roomVersion: roomVersionRef.current,
+    };
+    textsRef.current = textsRef.current.map((text) =>
+      text.textId === editingTextId ? updated : text
+    );
+    setTexts(textsRef.current);
+    textUndoStackRef.current.push(existing);
+    textRedoStackRef.current = [];
+    setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
+    publishText(updated);
+    void persistLines(linesRef.current).catch((error) => {
+      console.error("Lỗi lưu văn bản:", error);
+    });
+    setEditingTextId(null);
+  }, [editingTextId, editingTextValue, persistLines, publishText]);
+
+  const updateEditingText = useCallback(
+    (patch: Partial<Pick<TextEvent, "color" | "fontSize" | "align">>) => {
+      if (!editingTextId) return;
+      const existing = textsRef.current.find((text) => text.textId === editingTextId);
+      if (!existing) return;
+      const updated = { ...existing, ...patch, roomVersion: roomVersionRef.current };
+      textsRef.current = textsRef.current.map((text) =>
+        text.textId === editingTextId ? updated : text
+      );
+      setTexts(textsRef.current);
+      textUndoStackRef.current.push(existing);
+      textRedoStackRef.current = [];
+      publishText(updated);
+    },
+    [editingTextId, publishText]
+  );
+
   const handleMouseDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (!clientRef.current?.connected) return;
 
     const point = e.target.getStage()?.getPointerPosition();
     if (!point) return;
+
+    if (tool === "text") {
+      const text: TextEvent = {
+        roomId,
+        textId: crypto.randomUUID(),
+        x: point.x,
+        y: point.y,
+        text: "Text",
+        color,
+        fontSize,
+        fontFamily: "Arial",
+        fontStyle: "normal",
+        align: "left",
+        width: 0,
+        roomVersion: roomVersionRef.current,
+      };
+      textsRef.current = [...textsRef.current, text];
+      setTexts(textsRef.current);
+      textUndoStackRef.current.push(text);
+      textRedoStackRef.current = [];
+      setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+      setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
+      publishText(text);
+      setEditingTextId(text.textId);
+      setEditingTextValue(text.text);
+      return;
+    }
 
     if (tool !== "pen" && tool !== "eraser") {
       const shape: ShapeEvent = {
@@ -679,8 +918,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       setShapes(shapesRef.current);
       shapeUndoStackRef.current.push(shape);
       shapeRedoStackRef.current = [];
-      setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
-      setRedoCount(redoStackRef.current.length);
+      setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length);
+      setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length);
       setIsDrawing(true);
       publishShape(shape);
       return;
@@ -772,6 +1011,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   };
 
   const stopDrawing = () => {
+    if (editingTextId) return;
     if (currentShapeRef.current) {
       publishShape(currentShapeRef.current);
       currentShapeRef.current = null;
@@ -817,7 +1057,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   const requestUndo = useCallback(() => {
     const client = clientRef.current;
-    if (!client?.connected || undoStackRef.current.length + shapeUndoStackRef.current.length === 0) return;
+    if (!client?.connected || undoStackRef.current.length + shapeUndoStackRef.current.length + textUndoStackRef.current.length === 0) return;
 
     client.publish({
       destination: "/app/undo",
@@ -828,7 +1068,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   const requestRedo = useCallback(() => {
     const client = clientRef.current;
-    if (!client?.connected || redoStackRef.current.length + shapeRedoStackRef.current.length === 0) return;
+    if (!client?.connected || redoStackRef.current.length + shapeRedoStackRef.current.length + textRedoStackRef.current.length === 0) return;
 
     client.publish({
       destination: "/app/redo",
@@ -972,6 +1212,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         <button className={tool === "arrow" ? "tool-active" : ""} onClick={() => setTool("arrow")}>
           ➜ Arrow
         </button>
+        <button className={tool === "text" ? "tool-active" : ""} onClick={() => setTool("text")}>
+          T Text
+        </button>
 
         <label>
           Màu:
@@ -980,7 +1223,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             value={color}
             onChange={(e) => {
               setColor(e.target.value);
-              setTool("pen");
+              if (editingTextId) {
+                updateEditingText({ color: e.target.value });
+              } else {
+                setTool("pen");
+              }
             }}
           />
         </label>
@@ -993,6 +1240,20 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             max="20"
             value={width}
             onChange={(e) => setWidth(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Cỡ chữ: {fontSize}px
+          <input
+            type="range"
+            min="8"
+            max="96"
+            value={fontSize}
+            onChange={(e) => {
+              const nextFontSize = Number(e.target.value);
+              setFontSize(nextFontSize);
+              updateEditingText({ fontSize: nextFontSize });
+            }}
           />
         </label>
       </section>
@@ -1034,9 +1295,59 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                 }
                 return <Line key={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
               })}
+              {texts.map((text) => (
+                <Text
+                  key={text.textId}
+                  x={text.x}
+                  y={text.y}
+                  text={text.text}
+                  fill={text.color}
+                  fontSize={text.fontSize}
+                  fontFamily={text.fontFamily}
+                  fontStyle={text.fontStyle}
+                  align={text.align}
+                  width={text.width || undefined}
+                  lineHeight={1.2}
+                  onDblClick={() => {
+                    setEditingTextId(text.textId);
+                    setEditingTextValue(text.text);
+                  }}
+                  onDblTap={() => {
+                    setEditingTextId(text.textId);
+                    setEditingTextValue(text.text);
+                  }}
+                />
+              ))}
             </Layer>
             <LiveCursorsLayer cursors={Array.from(remoteCursors.values())} />
           </Stage>
+          {editingTextId && (
+            <textarea
+              autoFocus
+              value={editingTextValue}
+              onChange={(event) => setEditingTextValue(event.target.value)}
+              onBlur={commitTextEdit}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setEditingTextId(null);
+                }
+                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                  event.preventDefault();
+                  commitTextEdit();
+                }
+              }}
+              style={{
+                position: "absolute",
+                left: texts.find((text) => text.textId === editingTextId)?.x ?? 0,
+                top: texts.find((text) => text.textId === editingTextId)?.y ?? 0,
+                minWidth: 120,
+                minHeight: 40,
+                fontSize: texts.find((text) => text.textId === editingTextId)?.fontSize ?? fontSize,
+                color,
+                zIndex: 5,
+              }}
+            />
+          )}
           <ParticipantsPanel
             participants={participants}
             currentUserDisplayName={displayName}
