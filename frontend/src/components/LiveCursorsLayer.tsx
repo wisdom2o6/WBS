@@ -9,7 +9,7 @@ interface LiveCursorsLayerProps {
 
 export const LiveCursorsLayer: React.FC<LiveCursorsLayerProps> = ({ cursors }) => {
   return (
-    <Layer listening={false}>
+    <Layer name="export-excluded" listening={false}>
       {cursors.map((cursor) => {
         const color = getParticipantColor(cursor.displayName);
         const nameLength = cursor.displayName ? cursor.displayName.length : 4;
@@ -51,4 +51,3 @@ export const LiveCursorsLayer: React.FC<LiveCursorsLayerProps> = ({ cursors }) =
     </Layer>
   );
 };
-

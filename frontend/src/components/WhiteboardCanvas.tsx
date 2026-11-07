@@ -8,6 +8,8 @@ import type { CursorEvent } from "../types/cursor";
 import { ParticipantsPanel } from "./ParticipantsPanel";
 import { LiveCursorsLayer } from "./LiveCursorsLayer";
 import { UserNameModal } from "./UserNameModal";
+import { ExportDialog, type ExportOptions } from "./ExportDialog";
+import { exportWhiteboard } from "../utils/whiteboardExport";
 
 type DrawEvent = {
   roomId: string;
@@ -147,6 +149,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [editingTextValue, setEditingTextValue] = useState("");
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   const [displayName, setDisplayName] = useState<string>(() => {
     return sessionStorage.getItem("wbs_display_name") || "";
@@ -173,6 +177,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const nodeRefs = useRef(new Map<string, Konva.Node>());
   const transformerRef = useRef<Konva.Transformer | null>(null);
+  const stageRef = useRef<Konva.Stage | null>(null);
+  const contentLayerRef = useRef<Konva.Layer | null>(null);
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
 
@@ -1342,6 +1348,32 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     setTimeout(() => setCopied(false), 2500);
   };
 
+  const handleExport = async (options: ExportOptions) => {
+    const stage = stageRef.current;
+    const contentLayer = contentLayerRef.current;
+    if (!stage || !contentLayer) {
+      setStorageStatus("Không thể xuất: Canvas chưa sẵn sàng");
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      await exportWhiteboard(
+        stage,
+        contentLayer,
+        stage.find(".export-excluded"),
+        options
+      );
+      setStorageStatus(`Đã xuất ${options.format.toUpperCase()} thành công`);
+      setIsExportDialogOpen(false);
+    } catch (error) {
+      console.error("Lỗi xuất bảng vẽ:", error);
+      setStorageStatus("Xuất bảng vẽ thất bại");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   if (!displayName) {
     return <UserNameModal onSubmit={handleDisplayNameSubmit} />;
   }
@@ -1383,6 +1415,13 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         <div className="toolbar-actions">
           <button onClick={handleSave} disabled={!connected || isSaving} className="btn-action">
             {isSaving ? "Đang lưu..." : "💾 Lưu bảng vẽ"}
+          </button>
+          <button
+            onClick={() => setIsExportDialogOpen(true)}
+            disabled={isExporting}
+            className="btn-action"
+          >
+            📤 Export
           </button>
 
           <button onClick={clearCanvas} disabled={!connected} className="btn-action btn-danger">
@@ -1488,6 +1527,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       <section className="canvas-container">
         <div className="canvas-wrapper">
           <Stage
+            ref={(node) => {
+              stageRef.current = node;
+            }}
             width={Math.max(300, window.innerWidth - 80)}
             height={Math.max(300, window.innerHeight - 260)}
             onMouseDown={handleMouseDown}
@@ -1498,7 +1540,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             onTouchMove={handleMouseMove}
             onTouchEnd={stopDrawing}
           >
-            <Layer>
+            <Layer
+              ref={(node) => {
+                contentLayerRef.current = node;
+              }}
+            >
               {lines.map((line) => (
                 <Line
                   key={line.strokeId}
@@ -1569,6 +1615,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                 />
               ))}
               <Transformer
+                name="export-excluded"
                 ref={(node) => {
                   transformerRef.current = node;
                 }}
@@ -1620,6 +1667,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           />
         </div>
       </section>
+      {isExportDialogOpen && (
+        <ExportDialog
+          roomId={roomId}
+          busy={isExporting}
+          onClose={() => setIsExportDialogOpen(false)}
+          onExport={handleExport}
+        />
+      )}
     </main>
   );
 };
