@@ -172,6 +172,12 @@ public class DrawController {
                 .get();
     }
 
+    public long incrementRoomVersion(String roomId) {
+        return roomVersions
+                .computeIfAbsent(roomId, id -> new AtomicLong(0))
+                .incrementAndGet();
+    }
+
     public void draw(DrawEvent event) {
         draw(event, null);
     }

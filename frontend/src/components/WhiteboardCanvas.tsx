@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Client } from "@stomp/stompjs";
-import { Stage, Layer, Line, Rect, Circle, Arrow, Text } from "react-konva";
+import { Stage, Layer, Line, Rect, Circle, Arrow, Text, Transformer } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
+import type Konva from "konva";
 import type { Participant, PresenceUpdateEvent } from "../types/presence";
 import type { CursorEvent } from "../types/cursor";
 import { ParticipantsPanel } from "./ParticipantsPanel";
@@ -15,6 +16,8 @@ type DrawEvent = {
   color: string;
   width: number;
   roomVersion: number;
+  rotation?: number;
+  deleted?: boolean;
 };
 
 type ShapeType = "RECTANGLE" | "CIRCLE" | "LINE" | "ARROW";
@@ -35,6 +38,8 @@ type ShapeEvent = {
   color: string;
   strokeWidth: number;
   roomVersion: number;
+  rotation?: number;
+  deleted?: boolean;
 };
 
 type TextEvent = {
@@ -49,7 +54,19 @@ type TextEvent = {
   fontStyle: "normal" | "bold" | "italic";
   align: "left" | "center" | "right";
   width: number;
+  rotation?: number;
   deleted?: boolean;
+  roomVersion: number;
+};
+
+type EditEvent = {
+  roomId: string;
+  operationId: string;
+  transactionId: string;
+  operation: "UPDATE" | "DELETE";
+  objectType: "STROKE" | ShapeType | "TEXT";
+  objectId: string;
+  object?: Record<string, unknown>;
   roomVersion: number;
 };
 
@@ -102,7 +119,7 @@ type SavedState = {
   updatedAt: string;
 };
 
-type Tool = "pen" | "eraser" | "rectangle" | "circle" | "line" | "arrow" | "text";
+type Tool = "select" | "pen" | "eraser" | "rectangle" | "circle" | "line" | "arrow" | "text";
 
 interface WhiteboardCanvasProps {
   roomId: string;
@@ -129,6 +146,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const [redoCount, setRedoCount] = useState(0);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [editingTextValue, setEditingTextValue] = useState("");
+  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
 
   const [displayName, setDisplayName] = useState<string>(() => {
     return sessionStorage.getItem("wbs_display_name") || "";
@@ -153,8 +171,21 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const shapesRef = useRef<ShapeEvent[]>([]);
   const textsRef = useRef<TextEvent[]>([]);
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const nodeRefs = useRef(new Map<string, Konva.Node>());
+  const transformerRef = useRef<Konva.Transformer | null>(null);
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
+
+  useEffect(() => {
+    const transformer = transformerRef.current;
+    if (!transformer) return;
+    transformer.nodes(
+      selectedObjectIds
+        .map((id) => nodeRefs.current.get(id))
+        .filter((node): node is Konva.Node => Boolean(node))
+    );
+    transformer.getLayer()?.batchDraw();
+  }, [selectedObjectIds, lines, shapes, texts]);
 
   const handleDisplayNameSubmit = (name: string) => {
     sessionStorage.setItem("wbs_display_name", name);
@@ -476,6 +507,66 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             });
           } catch (error) {
             console.error("Lỗi nhận văn bản:", error);
+          }
+        });
+
+        client.subscribe(`/topic/rooms/${roomId}/edit`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as EditEvent;
+            if (
+              event.roomId !== roomId ||
+              !event.objectId ||
+              !Number.isInteger(event.roomVersion) ||
+              event.roomVersion <= roomVersionRef.current
+            ) {
+              return;
+            }
+            roomVersionRef.current = event.roomVersion;
+            const object = event.object ?? {};
+            if (event.operation === "DELETE") {
+              linesRef.current = linesRef.current.filter((line) => line.strokeId !== event.objectId);
+              shapesRef.current = shapesRef.current.filter((shape) => shape.shapeId !== event.objectId);
+              textsRef.current = textsRef.current.filter((text) => text.textId !== event.objectId);
+              setLines(linesRef.current);
+              setShapes(shapesRef.current);
+              setTexts(textsRef.current);
+              setSelectedObjectIds((ids) => ids.filter((id) => id !== event.objectId));
+            } else if (event.objectType === "STROKE") {
+              const next = linesRef.current.map((line) =>
+                line.strokeId === event.objectId ? { ...line, ...object, roomVersion: event.roomVersion } as DrawEvent : line
+              );
+              linesRef.current = next;
+              setLines(next);
+            } else if (event.objectType === "TEXT") {
+              const next = textsRef.current.map((text) =>
+                text.textId === event.objectId ? { ...text, ...object, roomVersion: event.roomVersion } as TextEvent : text
+              );
+              textsRef.current = next;
+              setTexts(next);
+            } else {
+              const next = shapesRef.current.map((shape) =>
+                shape.shapeId === event.objectId ? { ...shape, ...object, roomVersion: event.roomVersion } as ShapeEvent : shape
+              );
+              shapesRef.current = next;
+              setShapes(next);
+            }
+            void persistLines(linesRef.current).catch((error) => {
+              console.error("Lỗi lưu chỉnh sửa realtime:", error);
+            });
+          } catch (error) {
+            console.error("Lỗi nhận chỉnh sửa realtime:", error);
+          }
+        });
+
+        client.subscribe(`/topic/rooms/${roomId}/edit-conflict`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as { roomId: string; reason: string };
+            if (event.roomId === roomId) {
+              setStorageStatus(`Chỉnh sửa bị từ chối: ${event.reason}`);
+              void loadLines();
+            }
+          } catch (error) {
+            console.error("Lỗi nhận xung đột chỉnh sửa:", error);
           }
         });
 
@@ -812,6 +903,121 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     });
   }, []);
 
+  const publishEdit = useCallback(
+    (operation: "UPDATE" | "DELETE", objectType: EditEvent["objectType"], objectId: string, object?: Record<string, unknown>) => {
+      const client = clientRef.current;
+      if (!client?.connected) return;
+      client.publish({
+        destination: "/app/edit",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          operationId: crypto.randomUUID(),
+          transactionId: crypto.randomUUID(),
+          operation,
+          objectType,
+          objectId,
+          object,
+          baseRoomVersion: roomVersionRef.current,
+        }),
+      });
+    },
+    [roomId]
+  );
+
+  const selectObject = useCallback((objectId: string, additive: boolean) => {
+    setSelectedObjectIds((current) =>
+      additive
+        ? current.includes(objectId)
+          ? current.filter((id) => id !== objectId)
+          : [...current, objectId]
+        : [objectId]
+    );
+  }, []);
+
+  const deleteSelected = useCallback(() => {
+    if (!clientRef.current?.connected || selectedObjectIds.length === 0) return;
+    for (const objectId of selectedObjectIds) {
+      const line = linesRef.current.find((item) => item.strokeId === objectId);
+      const shape = shapesRef.current.find((item) => item.shapeId === objectId);
+      const objectType = line ? "STROKE" : shape ? shape.type : "TEXT";
+      publishEdit("DELETE", objectType, objectId);
+    }
+    linesRef.current = linesRef.current.filter((line) => !selectedObjectIds.includes(line.strokeId));
+    shapesRef.current = shapesRef.current.filter((shape) => !selectedObjectIds.includes(shape.shapeId));
+    textsRef.current = textsRef.current.filter((text) => !selectedObjectIds.includes(text.textId));
+    setLines(linesRef.current);
+    setShapes(shapesRef.current);
+    setTexts(textsRef.current);
+    setSelectedObjectIds([]);
+    void persistLines(linesRef.current).catch((error) => {
+      console.error("Lỗi lưu xóa đối tượng:", error);
+    });
+  }, [persistLines, publishEdit, selectedObjectIds]);
+
+  const updateObjectFromNode = useCallback((objectId: string, node: Konva.Node) => {
+    const position = node.position();
+    const rotation = node.rotation();
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const shape = shapesRef.current.find((item) => item.shapeId === objectId);
+    const text = textsRef.current.find((item) => item.textId === objectId);
+    const line = linesRef.current.find((item) => item.strokeId === objectId);
+    if (shape) {
+      const anchorX = shape.type === "CIRCLE" ? shape.startX : 0;
+      const anchorY = shape.type === "CIRCLE" ? shape.startY : 0;
+      const dx = position.x - anchorX;
+      const dy = position.y - anchorY;
+      const updated = {
+        ...shape,
+        x: shape.type === "RECTANGLE" ? position.x : shape.x,
+        y: shape.type === "RECTANGLE" ? position.y : shape.y,
+        startX: shape.startX + dx,
+        startY: shape.type === "CIRCLE" ? shape.startY + dy : shape.startY + dy,
+        endX: shape.endX + dx,
+        endY: shape.endY + dy,
+        width: shape.type === "RECTANGLE" ? Math.max(1, shape.width * scaleX) : shape.width,
+        height: shape.type === "RECTANGLE" ? Math.max(1, shape.height * scaleY) : shape.height,
+        radius: shape.type === "CIRCLE" ? Math.max(1, shape.radius * Math.max(scaleX, scaleY)) : shape.radius,
+        rotation,
+        roomVersion: roomVersionRef.current,
+      };
+      node.scale({ x: 1, y: 1 });
+      node.position({ x: 0, y: 0 });
+      shapesRef.current = shapesRef.current.map((item) => item.shapeId === objectId ? updated : item);
+      setShapes(shapesRef.current);
+      publishEdit("UPDATE", shape.type, objectId, {
+        x: updated.x, y: updated.y, width: updated.width, height: updated.height,
+        startX: updated.startX, startY: updated.startY, endX: updated.endX,
+        endY: updated.endY, radius: updated.radius, rotation,
+      });
+    } else if (text) {
+      const updated = { ...text, x: position.x, y: position.y, roomVersion: roomVersionRef.current };
+      textsRef.current = textsRef.current.map((item) => item.textId === objectId ? updated : item);
+      setTexts(textsRef.current);
+      publishEdit("UPDATE", "TEXT", objectId, { x: updated.x, y: updated.y, rotation });
+    } else if (line) {
+      const dx = position.x;
+      const dy = position.y;
+      const points = line.points.map((value, index) => value + (index % 2 === 0 ? dx : dy));
+      const updated = { ...line, points, rotation: 0, roomVersion: roomVersionRef.current };
+      node.position({ x: 0, y: 0 });
+      linesRef.current = linesRef.current.map((item) => item.strokeId === objectId ? updated : item);
+      setLines(linesRef.current);
+      publishEdit("UPDATE", "STROKE", objectId, { points, rotation: 0 });
+    }
+    void persistLines(linesRef.current).catch((error) => {
+      console.error("Lỗi lưu di chuyển đối tượng:", error);
+    });
+  }, [persistLines, publishEdit]);
+
+  const commitSelectedTransforms = useCallback(() => {
+    for (const objectId of selectedObjectIds) {
+      const node = nodeRefs.current.get(objectId);
+      if (node) updateObjectFromNode(objectId, node);
+    }
+  }, [selectedObjectIds, updateObjectFromNode]);
+
   const commitTextEdit = useCallback(() => {
     if (!editingTextId) return;
     const existing = textsRef.current.find((text) => text.textId === editingTextId);
@@ -878,6 +1084,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     const point = e.target.getStage()?.getPointerPosition();
     if (!point) return;
+
+    if (tool === "select") {
+      const targetId = (e.target as Konva.Node).getAttr("objectId") as string | undefined;
+      if (targetId) {
+        selectObject(targetId, "shiftKey" in e.evt && e.evt.shiftKey);
+      } else {
+        setSelectedObjectIds([]);
+      }
+      return;
+    }
 
     if (tool === "text") {
       const text: TextEvent = {
@@ -1079,6 +1295,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedObjectIds.length > 0) {
+        event.preventDefault();
+        deleteSelected();
+        return;
+      }
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier || event.altKey) return;
 
@@ -1097,7 +1318,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [requestRedo, requestUndo]);
+  }, [deleteSelected, requestRedo, requestUndo, selectedObjectIds.length]);
 
   const handleLeave = () => {
     const client = clientRef.current;
@@ -1188,6 +1409,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
       <section className="drawing-toolbar">
         <button
+          className={tool === "select" ? "tool-active" : ""}
+          onClick={() => setTool("select")}
+        >
+          🖱️ Chọn
+        </button>
+        <button
           className={tool === "pen" ? "tool-active" : ""}
           onClick={() => setTool("pen")}
         >
@@ -1275,31 +1502,46 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               {lines.map((line) => (
                 <Line
                   key={line.strokeId}
+                  ref={(node) => {
+                    if (node) nodeRefs.current.set(line.strokeId, node);
+                  }}
+                  objectId={line.strokeId}
                   points={line.points}
                   stroke={line.color}
                   strokeWidth={line.width}
                   lineCap="round"
                   lineJoin="round"
                   tension={0.3}
+                  draggable={tool === "select" && selectedObjectIds.includes(line.strokeId)}
+                  onClick={(event) => {
+                    if (tool === "select") selectObject(line.strokeId, event.evt.shiftKey);
+                  }}
+                  onTap={(event) => {
+                    if (tool === "select") selectObject(line.strokeId, event.evt.shiftKey);
+                  }}
+                  onDragEnd={(event) => updateObjectFromNode(line.strokeId, event.target)}
                 />
               ))}
               {shapes.map((shape) => {
                 if (shape.type === "RECTANGLE") {
-                  return <Rect key={shape.shapeId} x={shape.x} y={shape.y} width={shape.width} height={shape.height} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+                  return <Rect key={shape.shapeId} ref={(node) => { if (node) nodeRefs.current.set(shape.shapeId, node); }} objectId={shape.shapeId} x={shape.x} y={shape.y} width={shape.width} height={shape.height} rotation={shape.rotation ?? 0} stroke={shape.color} strokeWidth={shape.strokeWidth} draggable={tool === "select" && selectedObjectIds.includes(shape.shapeId)} onClick={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onTap={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onDragEnd={(event) => updateObjectFromNode(shape.shapeId, event.target)} />;
                 }
                 if (shape.type === "CIRCLE") {
-                  return <Circle key={shape.shapeId} x={shape.startX} y={shape.startY} radius={shape.radius} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+                  return <Circle key={shape.shapeId} ref={(node) => { if (node) nodeRefs.current.set(shape.shapeId, node); }} objectId={shape.shapeId} x={shape.startX} y={shape.startY} radius={shape.radius} rotation={shape.rotation ?? 0} stroke={shape.color} strokeWidth={shape.strokeWidth} draggable={tool === "select" && selectedObjectIds.includes(shape.shapeId)} onClick={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onTap={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onDragEnd={(event) => updateObjectFromNode(shape.shapeId, event.target)} />;
                 }
                 if (shape.type === "ARROW") {
-                  return <Arrow key={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} fill={shape.color} strokeWidth={shape.strokeWidth} pointerLength={10} pointerWidth={10} />;
+                  return <Arrow key={shape.shapeId} ref={(node) => { if (node) nodeRefs.current.set(shape.shapeId, node); }} objectId={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} fill={shape.color} strokeWidth={shape.strokeWidth} pointerLength={10} pointerWidth={10} draggable={tool === "select" && selectedObjectIds.includes(shape.shapeId)} onClick={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onTap={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onDragEnd={(event) => updateObjectFromNode(shape.shapeId, event.target)} />;
                 }
-                return <Line key={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+                return <Line key={shape.shapeId} ref={(node) => { if (node) nodeRefs.current.set(shape.shapeId, node); }} objectId={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} rotation={shape.rotation ?? 0} stroke={shape.color} strokeWidth={shape.strokeWidth} draggable={tool === "select" && selectedObjectIds.includes(shape.shapeId)} onClick={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onTap={(event) => { if (tool === "select") selectObject(shape.shapeId, event.evt.shiftKey); }} onDragEnd={(event) => updateObjectFromNode(shape.shapeId, event.target)} />;
               })}
               {texts.map((text) => (
                 <Text
                   key={text.textId}
+                  ref={(node) => { if (node) nodeRefs.current.set(text.textId, node); }}
+                  objectId={text.textId}
                   x={text.x}
                   y={text.y}
+                  rotation={text.rotation ?? 0}
                   text={text.text}
                   fill={text.color}
                   fontSize={text.fontSize}
@@ -1308,6 +1550,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                   align={text.align}
                   width={text.width || undefined}
                   lineHeight={1.2}
+                  draggable={tool === "select" && selectedObjectIds.includes(text.textId)}
+                  onClick={(event) => {
+                    if (tool === "select") selectObject(text.textId, event.evt.shiftKey);
+                  }}
+                  onTap={(event) => {
+                    if (tool === "select") selectObject(text.textId, event.evt.shiftKey);
+                  }}
+                  onDragEnd={(event) => updateObjectFromNode(text.textId, event.target)}
                   onDblClick={() => {
                     setEditingTextId(text.textId);
                     setEditingTextValue(text.text);
@@ -1318,6 +1568,22 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                   }}
                 />
               ))}
+              <Transformer
+                ref={(node) => {
+                  transformerRef.current = node;
+                }}
+                rotateEnabled={selectedObjectIds.length === 1}
+                keepRatio={false}
+                enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right"]}
+                onTransformEnd={(event) => {
+                  if (selectedObjectIds.length === 1) {
+                    updateObjectFromNode(selectedObjectIds[0], event.target);
+                  } else {
+                    commitSelectedTransforms();
+                  }
+                }}
+                onDragEnd={commitSelectedTransforms}
+              />
             </Layer>
             <LiveCursorsLayer cursors={Array.from(remoteCursors.values())} />
           </Stage>
