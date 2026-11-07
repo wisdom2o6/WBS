@@ -17,6 +17,16 @@ type DrawEvent = {
   roomVersion: number;
 };
 
+type UndoRedoEvent = {
+  action: "UNDO" | "REDO";
+  roomId: string;
+  strokeId: string;
+  points: number[];
+  color: string;
+  width: number;
+  roomVersion: number;
+};
+
 type ClearEvent = {
   roomId: string;
   roomVersion: number;
@@ -56,6 +66,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [storageStatus, setStorageStatus] = useState("Chưa tải dữ liệu");
   const [copied, setCopied] = useState(false);
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
 
   const [displayName, setDisplayName] = useState<string>(() => {
     return sessionStorage.getItem("wbs_display_name") || "";
@@ -69,6 +81,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const roomVersionRef = useRef(0);
   const lastCursorSendTimeRef = useRef(0);
   const lastCursorPosRef = useRef<{ x: number; y: number } | null>(null);
+  const undoStackRef = useRef<DrawEvent[]>([]);
+  const redoStackRef = useRef<DrawEvent[]>([]);
+  const linesRef = useRef<DrawEvent[]>([]);
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
 
@@ -102,6 +118,15 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       return response.json();
     },
     [apiStateUrl]
+  );
+
+  const persistLines = useCallback(
+    (currentLines: DrawEvent[]) => {
+      const nextSave = saveQueueRef.current.then(() => saveLines(currentLines));
+      saveQueueRef.current = nextSave.catch(() => undefined);
+      return nextSave;
+    },
+    [saveLines]
   );
 
   // Tải dữ liệu đã lưu trong PostgreSQL của phòng này.
@@ -163,7 +188,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           merged.set(line.strokeId, line);
         }
 
-        return Array.from(merged.values());
+        const nextLines = Array.from(merged.values());
+        linesRef.current = nextLines;
+        return nextLines;
       });
 
       setStorageStatus(`Đã tải ${restoredLines.length} nét vẽ từ PostgreSQL`);
@@ -269,11 +296,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               );
 
               if (index === -1) {
-                return [...previous, event];
+                const nextLines = [...previous, event];
+                linesRef.current = nextLines;
+                return nextLines;
               }
 
               const updated = [...previous];
               updated[index] = event;
+              linesRef.current = updated;
               return updated;
             });
           } catch (error) {
@@ -297,10 +327,15 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             currentStrokeIdRef.current = null;
             currentPointsRef.current = [];
             setIsDrawing(false);
+            linesRef.current = [];
             setLines([]);
+            undoStackRef.current = [];
+            redoStackRef.current = [];
+            setUndoCount(0);
+            setRedoCount(0);
 
             // Lưu trạng thái rỗng để tải lại trang không phục hồi nét đã xóa.
-            void saveLines([])
+            void persistLines([])
               .then(() => {
                 setStorageStatus("Đã xóa và lưu bảng vẽ");
               })
@@ -312,6 +347,74 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               });
           } catch (error) {
             console.error("Lỗi nhận sự kiện xóa:", error);
+          }
+        });
+
+        client.subscribe(`/topic/rooms/${roomId}/undo`, (frame) => {
+          try {
+            const event = JSON.parse(frame.body) as UndoRedoEvent;
+            if (
+              event.roomId !== roomId ||
+              !["UNDO", "REDO"].includes(event.action) ||
+              typeof event.strokeId !== "string" ||
+              !Array.isArray(event.points) ||
+              !Number.isInteger(event.roomVersion) ||
+              event.roomVersion <= roomVersionRef.current
+            ) {
+              return;
+            }
+
+            roomVersionRef.current = event.roomVersion;
+            const operation: DrawEvent = {
+              roomId,
+              strokeId: event.strokeId,
+              points: event.points,
+              color: event.color,
+              width: event.width,
+              roomVersion: event.roomVersion,
+            };
+
+            let nextLines: DrawEvent[] | null = null;
+            if (event.action === "UNDO") {
+              const localIndex = undoStackRef.current.findIndex(
+                (line) => line.strokeId === event.strokeId
+              );
+              if (localIndex !== -1) {
+                const [localOperation] = undoStackRef.current.splice(localIndex, 1);
+                redoStackRef.current.push(localOperation);
+                setUndoCount(undoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length);
+              }
+              nextLines = linesRef.current.filter(
+                (line) => line.strokeId !== event.strokeId
+              );
+            } else {
+              const localIndex = redoStackRef.current.findIndex(
+                (line) => line.strokeId === event.strokeId
+              );
+              if (localIndex !== -1) {
+                const [localOperation] = redoStackRef.current.splice(localIndex, 1);
+                undoStackRef.current.push(localOperation);
+                setUndoCount(undoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length);
+              }
+              nextLines = linesRef.current.some(
+                (line) => line.strokeId === event.strokeId
+              )
+                ? linesRef.current.map((line) =>
+                    line.strokeId === event.strokeId ? operation : line
+                  )
+                : [...linesRef.current, operation];
+            }
+
+            linesRef.current = nextLines;
+            setLines(nextLines);
+            void persistLines(nextLines).catch((error) => {
+              console.error("Lỗi lưu trạng thái undo/redo:", error);
+              setStorageStatus("Đã cập nhật Canvas nhưng chưa lưu được vào PostgreSQL");
+            });
+          } catch (error) {
+            console.error("Lỗi nhận sự kiện undo/redo:", error);
           }
         });
 
@@ -348,7 +451,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       clientRef.current = null;
       void client.deactivate();
     };
-  }, [roomId, displayName, loadLines, saveLines]);
+  }, [roomId, displayName, loadLines, persistLines]);
+
+  useEffect(() => {
+    linesRef.current = lines;
+  }, [lines]);
 
   // Tự động loại bỏ cursor mất tín hiệu quá 5 giây
   useEffect(() => {
@@ -446,7 +553,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       roomVersion: roomVersionRef.current,
     };
 
-    setLines((previous) => [...previous, line]);
+    linesRef.current = [...linesRef.current, line];
+    setLines(linesRef.current);
+    undoStackRef.current.push(line);
+    redoStackRef.current = [];
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(0);
     publishStroke(points);
   };
 
@@ -473,8 +585,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     const strokeId = currentStrokeIdRef.current;
 
-    setLines((previous) =>
-      previous.map((line) =>
+    linesRef.current = linesRef.current.map((line) =>
         line.strokeId === strokeId
           ? {
               ...line,
@@ -483,8 +594,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               width: tool === "eraser" ? Math.max(width, 18) : width,
             }
           : line
-      )
     );
+    setLines(linesRef.current);
 
     publishStroke(points);
   };
@@ -506,7 +617,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     setStorageStatus("Đang lưu vào PostgreSQL...");
 
     try {
-      await saveLines(lines);
+      await persistLines(lines);
       setStorageStatus(`Đã lưu ${lines.length} nét vẽ vào PostgreSQL`);
     } catch (error) {
       console.error("Lỗi lưu bảng vẽ:", error);
@@ -526,6 +637,50 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       body: JSON.stringify({ roomId }),
     });
   };
+
+  const requestUndo = useCallback(() => {
+    const client = clientRef.current;
+    if (!client?.connected || undoStackRef.current.length === 0) return;
+
+    client.publish({
+      destination: "/app/undo",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId, requestId: crypto.randomUUID() }),
+    });
+  }, [roomId]);
+
+  const requestRedo = useCallback(() => {
+    const client = clientRef.current;
+    if (!client?.connected || redoStackRef.current.length === 0) return;
+
+    client.publish({
+      destination: "/app/redo",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId, requestId: crypto.randomUUID() }),
+    });
+  }, [roomId]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.ctrlKey || event.metaKey;
+      if (!modifier || event.altKey) return;
+
+      if (event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.metaKey && event.shiftKey) {
+          requestRedo();
+        } else {
+          requestUndo();
+        }
+      } else if (event.ctrlKey && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        requestRedo();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [requestRedo, requestUndo]);
 
   const handleLeave = () => {
     const client = clientRef.current;
@@ -594,6 +749,22 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
           <button onClick={clearCanvas} disabled={!connected} className="btn-action btn-danger">
             🗑️ Xóa toàn bộ
+          </button>
+          <button
+            onClick={requestUndo}
+            disabled={!connected || undoCount === 0}
+            className="btn-action"
+            title="Ctrl/Cmd + Z"
+          >
+            ↶ Undo
+          </button>
+          <button
+            onClick={requestRedo}
+            disabled={!connected || redoCount === 0}
+            className="btn-action"
+            title="Ctrl + Y hoặc Cmd + Shift + Z"
+          >
+            ↷ Redo
           </button>
         </div>
       </header>

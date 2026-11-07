@@ -3,6 +3,8 @@ package com.wisdom.wbs.controller;
 import com.wisdom.wbs.controller.DrawController.ClearEvent;
 import com.wisdom.wbs.controller.DrawController.ClearRequest;
 import com.wisdom.wbs.controller.DrawController.DrawEvent;
+import com.wisdom.wbs.controller.DrawController.UndoRedoEvent;
+import com.wisdom.wbs.controller.DrawController.UndoRedoRequest;
 import com.wisdom.wbs.service.WhiteboardRoomService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -129,5 +131,58 @@ class DrawControllerTest {
         assertEquals(1, controller.getRoomVersion("room1"));
         assertEquals(0, controller.getRoomVersion("room2"));
     }
-}
 
+    @Test
+    void testUndoAndRedoBroadcastTheOwnOperation() {
+        DrawEvent event = new DrawEvent(
+                "room1", "stroke-undo", new double[]{1, 2}, "#2563eb", 3, 0);
+        controller.draw(event);
+        sentMessages.clear();
+
+        controller.undo(new UndoRedoRequest("room1", "undo-1"), null);
+
+        assertEquals(1, sentMessages.size());
+        assertEquals("/topic/rooms/room1/undo", sentMessages.get(0).destination());
+        UndoRedoEvent undo = (UndoRedoEvent) sentMessages.get(0).payload();
+        assertEquals("UNDO", undo.action());
+        assertEquals("stroke-undo", undo.strokeId());
+        assertEquals(1, undo.roomVersion());
+
+        sentMessages.clear();
+        controller.redo(new UndoRedoRequest("room1", "redo-1"), null);
+
+        assertEquals(1, sentMessages.size());
+        UndoRedoEvent redo = (UndoRedoEvent) sentMessages.get(0).payload();
+        assertEquals("REDO", redo.action());
+        assertEquals("stroke-undo", redo.strokeId());
+        assertEquals(2, redo.roomVersion());
+    }
+
+    @Test
+    void testDuplicateUndoRequestIsIgnored() {
+        controller.draw(new DrawEvent(
+                "room1", "stroke-once", new double[]{1, 2}, "#2563eb", 3, 0));
+        sentMessages.clear();
+
+        UndoRedoRequest request = new UndoRedoRequest("room1", "same-request");
+        controller.undo(request, null);
+        controller.undo(request, null);
+
+        assertEquals(1, sentMessages.size());
+        assertEquals(1, controller.getRoomVersion("room1"));
+    }
+
+    @Test
+    void testRedoIsInvalidatedByNewOperation() {
+        controller.draw(new DrawEvent(
+                "room1", "stroke-old", new double[]{1, 2}, "#2563eb", 3, 0));
+        controller.undo(new UndoRedoRequest("room1", "undo-old"), null);
+        controller.draw(new DrawEvent(
+                "room1", "stroke-new", new double[]{3, 4}, "#2563eb", 1, 1));
+        sentMessages.clear();
+
+        controller.redo(new UndoRedoRequest("room1", "redo-old"), null);
+
+        assertEquals(0, sentMessages.size());
+    }
+}
