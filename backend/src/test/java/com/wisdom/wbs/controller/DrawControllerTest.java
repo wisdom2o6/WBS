@@ -5,6 +5,8 @@ import com.wisdom.wbs.controller.DrawController.ClearRequest;
 import com.wisdom.wbs.controller.DrawController.DrawEvent;
 import com.wisdom.wbs.controller.DrawController.UndoRedoEvent;
 import com.wisdom.wbs.controller.DrawController.UndoRedoRequest;
+import com.wisdom.wbs.controller.DrawController.ShapeEvent;
+import com.wisdom.wbs.controller.DrawController.ShapeUndoRedoEvent;
 import com.wisdom.wbs.service.WhiteboardRoomService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -184,5 +186,45 @@ class DrawControllerTest {
         controller.redo(new UndoRedoRequest("room1", "redo-old"), null);
 
         assertEquals(0, sentMessages.size());
+    }
+
+    @Test
+    void testShapeIsBroadcastAndParticipatesInUndoRedo() {
+        ShapeEvent shape = new ShapeEvent(
+                "room1", "shape-1", "RECTANGLE",
+                10, 20, 100, 50, 10, 20, 110, 70, 1,
+                "#2563eb", 3, 0);
+
+        controller.shape(shape, null);
+
+        assertEquals(1, sentMessages.size());
+        assertEquals("/topic/rooms/room1/shape", sentMessages.get(0).destination());
+        assertEquals(shape, sentMessages.get(0).payload());
+
+        sentMessages.clear();
+        controller.undo(new UndoRedoRequest("room1", "shape-undo"), null);
+
+        assertEquals(1, sentMessages.size());
+        assertTrue(sentMessages.get(0).payload() instanceof ShapeUndoRedoEvent);
+        ShapeUndoRedoEvent undo = (ShapeUndoRedoEvent) sentMessages.get(0).payload();
+        assertEquals("UNDO", undo.action());
+        assertEquals("shape-1", undo.shapeId());
+        assertEquals(1, undo.roomVersion());
+    }
+
+    @Test
+    void testInvalidShapeAndWrongRoomVersionAreIgnored() {
+        controller.shape(new ShapeEvent(
+                "room1", "bad-shape", "RECTANGLE",
+                0, 0, 0, 20, 0, 0, 0, 20, 1,
+                "#2563eb", 3, 0), null);
+        assertEquals(0, sentMessages.size());
+
+        controller.clear(new ClearRequest("room1"));
+        controller.shape(new ShapeEvent(
+                "room1", "late-shape", "CIRCLE",
+                0, 0, 0, 0, 0, 0, 10, 10, 0,
+                "#2563eb", 3, 0), null);
+        assertEquals(1, sentMessages.size());
     }
 }

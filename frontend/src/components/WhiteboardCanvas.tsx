@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Client } from "@stomp/stompjs";
-import { Stage, Layer, Line } from "react-konva";
+import { Stage, Layer, Line, Rect, Circle, Arrow } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
 import type { Participant, PresenceUpdateEvent } from "../types/presence";
 import type { CursorEvent } from "../types/cursor";
@@ -17,6 +17,26 @@ type DrawEvent = {
   roomVersion: number;
 };
 
+type ShapeType = "RECTANGLE" | "CIRCLE" | "LINE" | "ARROW";
+
+type ShapeEvent = {
+  roomId: string;
+  shapeId: string;
+  type: ShapeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  radius: number;
+  color: string;
+  strokeWidth: number;
+  roomVersion: number;
+};
+
 type UndoRedoEvent = {
   action: "UNDO" | "REDO";
   roomId: string;
@@ -25,6 +45,17 @@ type UndoRedoEvent = {
   color: string;
   width: number;
   roomVersion: number;
+  shapeId?: string;
+  type?: ShapeType;
+  x?: number;
+  y?: number;
+  height?: number;
+  startX?: number;
+  startY?: number;
+  endX?: number;
+  endY?: number;
+  radius?: number;
+  strokeWidth?: number;
 };
 
 type ClearEvent = {
@@ -41,12 +72,13 @@ type SavedState = {
       color: string;
       width: number;
     }>;
+    shapes?: Array<ShapeEvent>;
   };
   roomVersion?: number;
   updatedAt: string;
 };
 
-type Tool = "pen" | "eraser";
+type Tool = "pen" | "eraser" | "rectangle" | "circle" | "line" | "arrow";
 
 interface WhiteboardCanvasProps {
   roomId: string;
@@ -58,6 +90,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   onLeaveRoom,
 }) => {
   const [lines, setLines] = useState<DrawEvent[]>([]);
+  const [shapes, setShapes] = useState<ShapeEvent[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [connected, setConnected] = useState(false);
   const [tool, setTool] = useState<Tool>("pen");
@@ -78,12 +111,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const clientRef = useRef<Client | null>(null);
   const currentStrokeIdRef = useRef<string | null>(null);
   const currentPointsRef = useRef<number[]>([]);
+  const currentShapeRef = useRef<ShapeEvent | null>(null);
   const roomVersionRef = useRef(0);
   const lastCursorSendTimeRef = useRef(0);
   const lastCursorPosRef = useRef<{ x: number; y: number } | null>(null);
   const undoStackRef = useRef<DrawEvent[]>([]);
   const redoStackRef = useRef<DrawEvent[]>([]);
+  const shapeUndoStackRef = useRef<ShapeEvent[]>([]);
+  const shapeRedoStackRef = useRef<ShapeEvent[]>([]);
   const linesRef = useRef<DrawEvent[]>([]);
+  const shapesRef = useRef<ShapeEvent[]>([]);
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const apiStateUrl = `http://localhost:8080/api/rooms/${roomId}/state`;
@@ -108,6 +145,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             color: line.color,
             width: line.width,
           })),
+          shapes: shapesRef.current.map(({ roomId: _roomId, ...shape }) => shape),
         }),
       });
 
@@ -175,6 +213,13 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           width: line.width,
           roomVersion: roomVersionRef.current,
         }));
+      const restoredShapes: ShapeEvent[] = (result.data.shapes ?? [])
+        .filter((shape) =>
+          shape && typeof shape.shapeId === "string" &&
+          ["RECTANGLE", "CIRCLE", "LINE", "ARROW"].includes(shape.type) &&
+          typeof shape.color === "string" && typeof shape.strokeWidth === "number"
+        )
+        .map((shape) => ({ ...shape, roomId, roomVersion: roomVersionRef.current }));
 
       // Giữ các nét vẽ realtime vừa nhận được trong lúc tải dữ liệu.
       setLines((previous) => {
@@ -192,8 +237,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         linesRef.current = nextLines;
         return nextLines;
       });
+      setShapes((previous) => {
+        const merged = new Map<string, ShapeEvent>();
+        for (const shape of restoredShapes) merged.set(shape.shapeId, shape);
+        for (const shape of previous) merged.set(shape.shapeId, shape);
+        const nextShapes = Array.from(merged.values());
+        shapesRef.current = nextShapes;
+        return nextShapes;
+      });
 
-      setStorageStatus(`Đã tải ${restoredLines.length} nét vẽ từ PostgreSQL`);
+      setStorageStatus(`Đã tải ${restoredLines.length} nét và ${restoredShapes.length} hình từ PostgreSQL`);
     } catch (error) {
       console.error("Lỗi tải bảng vẽ:", error);
       setStorageStatus("Không tải được dữ liệu đã lưu");
@@ -306,6 +359,29 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               linesRef.current = updated;
               return updated;
             });
+
+            client.subscribe(`/topic/rooms/${roomId}/shape`, (frame) => {
+              try {
+                const event = JSON.parse(frame.body) as ShapeEvent;
+                if (
+                  event.roomId !== roomId ||
+                  typeof event.shapeId !== "string" ||
+                  !["RECTANGLE", "CIRCLE", "LINE", "ARROW"].includes(event.type) ||
+                  !Number.isInteger(event.roomVersion) ||
+                  event.roomVersion !== roomVersionRef.current
+                ) return;
+                setShapes((previous) => {
+                  const next = [...previous];
+                  const index = next.findIndex((shape) => shape.shapeId === event.shapeId);
+                  if (index === -1) next.push(event);
+                  else next[index] = event;
+                  shapesRef.current = next;
+                  return next;
+                });
+              } catch (error) {
+                console.error("Lỗi nhận hình vẽ:", error);
+              }
+            });
           } catch (error) {
             console.error("Lỗi nhận nét vẽ:", error);
           }
@@ -329,8 +405,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             setIsDrawing(false);
             linesRef.current = [];
             setLines([]);
+            shapesRef.current = [];
+            setShapes([]);
             undoStackRef.current = [];
             redoStackRef.current = [];
+            shapeUndoStackRef.current = [];
+            shapeRedoStackRef.current = [];
             setUndoCount(0);
             setRedoCount(0);
 
@@ -356,8 +436,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             if (
               event.roomId !== roomId ||
               !["UNDO", "REDO"].includes(event.action) ||
-              typeof event.strokeId !== "string" ||
-              !Array.isArray(event.points) ||
+              (typeof event.shapeId !== "string" && typeof event.strokeId !== "string") ||
+              (typeof event.shapeId !== "string" && !Array.isArray(event.points)) ||
               !Number.isInteger(event.roomVersion) ||
               event.roomVersion <= roomVersionRef.current
             ) {
@@ -365,6 +445,42 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             }
 
             roomVersionRef.current = event.roomVersion;
+            if (event.shapeId && event.type) {
+              roomVersionRef.current = event.roomVersion;
+              const operation: ShapeEvent = {
+                roomId, shapeId: event.shapeId, type: event.type,
+                x: event.x ?? 0, y: event.y ?? 0, width: event.width ?? 0,
+                height: event.height ?? 0, startX: event.startX ?? 0,
+                startY: event.startY ?? 0, endX: event.endX ?? 0,
+                endY: event.endY ?? 0, radius: event.radius ?? 0,
+                color: event.color, strokeWidth: event.strokeWidth ?? event.width ?? 1,
+                roomVersion: event.roomVersion,
+              };
+              const nextShapes = event.action === "UNDO"
+                ? shapesRef.current.filter((shape) => shape.shapeId !== event.shapeId)
+                : [...shapesRef.current.filter((shape) => shape.shapeId !== event.shapeId), operation];
+              if (event.action === "UNDO") {
+                const local = shapeUndoStackRef.current.find((shape) => shape.shapeId === event.shapeId);
+                if (local) {
+                  shapeUndoStackRef.current = shapeUndoStackRef.current.filter((shape) => shape.shapeId !== event.shapeId);
+                  shapeRedoStackRef.current.push(local);
+                }
+              } else {
+                const local = shapeRedoStackRef.current.find((shape) => shape.shapeId === event.shapeId);
+                if (local) {
+                  shapeRedoStackRef.current = shapeRedoStackRef.current.filter((shape) => shape.shapeId !== event.shapeId);
+                  shapeUndoStackRef.current.push(local);
+                }
+              }
+              setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
+              setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
+              shapesRef.current = nextShapes;
+              setShapes(nextShapes);
+              void persistLines(linesRef.current).catch((error) => {
+                console.error("Lỗi lưu trạng thái undo/redo:", error);
+              });
+              return;
+            }
             const operation: DrawEvent = {
               roomId,
               strokeId: event.strokeId,
@@ -382,8 +498,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               if (localIndex !== -1) {
                 const [localOperation] = undoStackRef.current.splice(localIndex, 1);
                 redoStackRef.current.push(localOperation);
-                setUndoCount(undoStackRef.current.length);
-                setRedoCount(redoStackRef.current.length);
+                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
               }
               nextLines = linesRef.current.filter(
                 (line) => line.strokeId !== event.strokeId
@@ -395,8 +511,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               if (localIndex !== -1) {
                 const [localOperation] = redoStackRef.current.splice(localIndex, 1);
                 undoStackRef.current.push(localOperation);
-                setUndoCount(undoStackRef.current.length);
-                setRedoCount(redoStackRef.current.length);
+                setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
+                setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
               }
               nextLines = linesRef.current.some(
                 (line) => line.strokeId === event.strokeId
@@ -456,6 +572,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   useEffect(() => {
     linesRef.current = lines;
   }, [lines]);
+
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
 
   // Tự động loại bỏ cursor mất tín hiệu quá 5 giây
   useEffect(() => {
@@ -531,11 +651,40 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     [roomId, tool, color, width]
   );
 
+  const publishShape = useCallback((shape: ShapeEvent) => {
+    const client = clientRef.current;
+    if (!client?.connected) return;
+    client.publish({
+      destination: "/app/shape",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(shape),
+    });
+  }, []);
+
   const handleMouseDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (!clientRef.current?.connected) return;
 
     const point = e.target.getStage()?.getPointerPosition();
     if (!point) return;
+
+    if (tool !== "pen" && tool !== "eraser") {
+      const shape: ShapeEvent = {
+        roomId, shapeId: crypto.randomUUID(), type: tool.toUpperCase() as ShapeType,
+        x: point.x, y: point.y, width: 0, height: 0,
+        startX: point.x, startY: point.y, endX: point.x, endY: point.y,
+        radius: 1, color, strokeWidth: width, roomVersion: roomVersionRef.current,
+      };
+      currentShapeRef.current = shape;
+      shapesRef.current = [...shapesRef.current, shape];
+      setShapes(shapesRef.current);
+      shapeUndoStackRef.current.push(shape);
+      shapeRedoStackRef.current = [];
+      setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
+      setRedoCount(redoStackRef.current.length);
+      setIsDrawing(true);
+      publishShape(shape);
+      return;
+    }
 
     const strokeId = crypto.randomUUID();
     const points = [point.x, point.y];
@@ -557,8 +706,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     setLines(linesRef.current);
     undoStackRef.current.push(line);
     redoStackRef.current = [];
-    setUndoCount(undoStackRef.current.length);
-    setRedoCount(0);
+    setUndoCount(undoStackRef.current.length + shapeUndoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length + shapeRedoStackRef.current.length);
     publishStroke(points);
   };
 
@@ -568,7 +717,29 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     sendCursorPosition(point.x, point.y);
 
-    if (!isDrawing || !currentStrokeIdRef.current) return;
+    if (!isDrawing) return;
+
+    if (currentShapeRef.current) {
+      const initial = currentShapeRef.current;
+      const next: ShapeEvent = {
+        ...initial,
+        x: Math.min(initial.startX, point.x),
+        y: Math.min(initial.startY, point.y),
+        width: Math.abs(point.x - initial.startX),
+        height: Math.abs(point.y - initial.startY),
+        endX: point.x,
+        endY: point.y,
+        radius: Math.max(1, Math.hypot(point.x - initial.startX, point.y - initial.startY)),
+      };
+      currentShapeRef.current = next;
+      shapesRef.current = shapesRef.current.map((shape) =>
+        shape.shapeId === next.shapeId ? next : shape
+      );
+      setShapes(shapesRef.current);
+      publishShape(next);
+      return;
+    }
+    if (!currentStrokeIdRef.current) return;
 
     // Giảm thiểu lưu lượng và tối ưu cộng tác đồng thời: bỏ qua các điểm di chuyển quá nhỏ (< 2px)
     const pointsArray = currentPointsRef.current;
@@ -601,6 +772,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   };
 
   const stopDrawing = () => {
+    if (currentShapeRef.current) {
+      publishShape(currentShapeRef.current);
+      currentShapeRef.current = null;
+      setIsDrawing(false);
+      return;
+    }
     if (currentStrokeIdRef.current) {
       publishStroke([...currentPointsRef.current]);
     }
@@ -640,7 +817,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   const requestUndo = useCallback(() => {
     const client = clientRef.current;
-    if (!client?.connected || undoStackRef.current.length === 0) return;
+    if (!client?.connected || undoStackRef.current.length + shapeUndoStackRef.current.length === 0) return;
 
     client.publish({
       destination: "/app/undo",
@@ -651,7 +828,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   const requestRedo = useCallback(() => {
     const client = clientRef.current;
-    if (!client?.connected || redoStackRef.current.length === 0) return;
+    if (!client?.connected || redoStackRef.current.length + shapeRedoStackRef.current.length === 0) return;
 
     client.publish({
       destination: "/app/redo",
@@ -783,6 +960,18 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         >
           🧹 Tẩy
         </button>
+        <button className={tool === "rectangle" ? "tool-active" : ""} onClick={() => setTool("rectangle")}>
+          ▭ Rectangle
+        </button>
+        <button className={tool === "circle" ? "tool-active" : ""} onClick={() => setTool("circle")}>
+          ◯ Circle
+        </button>
+        <button className={tool === "line" ? "tool-active" : ""} onClick={() => setTool("line")}>
+          ／ Line
+        </button>
+        <button className={tool === "arrow" ? "tool-active" : ""} onClick={() => setTool("arrow")}>
+          ➜ Arrow
+        </button>
 
         <label>
           Màu:
@@ -833,6 +1022,18 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                   tension={0.3}
                 />
               ))}
+              {shapes.map((shape) => {
+                if (shape.type === "RECTANGLE") {
+                  return <Rect key={shape.shapeId} x={shape.x} y={shape.y} width={shape.width} height={shape.height} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+                }
+                if (shape.type === "CIRCLE") {
+                  return <Circle key={shape.shapeId} x={shape.startX} y={shape.startY} radius={shape.radius} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+                }
+                if (shape.type === "ARROW") {
+                  return <Arrow key={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} fill={shape.color} strokeWidth={shape.strokeWidth} pointerLength={10} pointerWidth={10} />;
+                }
+                return <Line key={shape.shapeId} points={[shape.startX, shape.startY, shape.endX, shape.endY]} stroke={shape.color} strokeWidth={shape.strokeWidth} />;
+              })}
             </Layer>
             <LiveCursorsLayer cursors={Array.from(remoteCursors.values())} />
           </Stage>

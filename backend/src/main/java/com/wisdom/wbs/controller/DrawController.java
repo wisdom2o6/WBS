@@ -51,6 +51,24 @@ public class DrawController {
         long roomVersion
     ) {}
 
+    public record ShapeEvent(
+        String roomId,
+        String shapeId,
+        String type,
+        double x,
+        double y,
+        double width,
+        double height,
+        double startX,
+        double startY,
+        double endX,
+        double endY,
+        double radius,
+        String color,
+        double strokeWidth,
+        long roomVersion
+    ) {}
+
     public record ClearRequest(String roomId) {}
 
     public record ClearEvent(String roomId, long roomVersion) {}
@@ -71,11 +89,32 @@ public class DrawController {
             long roomVersion
     ) {}
 
+    public record ShapeUndoRedoEvent(
+            String action,
+            String roomId,
+            String shapeId,
+            String type,
+            double x,
+            double y,
+            double width,
+            double height,
+            double startX,
+            double startY,
+            double endX,
+            double endY,
+            double radius,
+            String color,
+            double strokeWidth,
+            long roomVersion
+    ) {}
+
     private record Operation(
+            String elementType,
             String strokeId,
             double[] points,
             String color,
-            double width
+            double width,
+            ShapeEvent shape
     ) {}
 
     private static final class RoomHistory {
@@ -168,6 +207,54 @@ public class DrawController {
             "/topic/rooms/" + event.roomId() + "/draw",
             event
         );
+    }
+
+    @MessageMapping("/shape")
+    public void shape(ShapeEvent event, SimpMessageHeaderAccessor headerAccessor) {
+        if (event == null
+                || !validRoomId(event.roomId())
+                || event.shapeId() == null
+                || !event.shapeId().matches("^[a-zA-Z0-9_-]{1,100}$")
+                || event.type() == null
+                || !event.type().matches("^(RECTANGLE|CIRCLE|LINE|ARROW)$")
+                || event.color() == null
+                || !event.color().matches("^#[0-9a-fA-F]{6}$")
+                || !Double.isFinite(event.strokeWidth())
+                || event.strokeWidth() < 1
+                || event.strokeWidth() > 50
+                || !validGeometry(event)) {
+            return;
+        }
+        if (!roomService.roomExists(event.roomId())) {
+            return;
+        }
+        String participantId = participantId(event.roomId(), headerAccessor);
+        if (participantId == null || event.roomVersion() != getRoomVersion(event.roomId())) {
+            return;
+        }
+
+        RoomHistory history = roomHistories.computeIfAbsent(
+                event.roomId(), id -> new RoomHistory());
+        synchronized (history) {
+            java.util.LinkedHashMap<String, Operation> active =
+                    history.activeByParticipant.computeIfAbsent(
+                            participantId, id -> new java.util.LinkedHashMap<>());
+            if (active.containsKey(event.shapeId())) {
+                active.put(event.shapeId(), operationOf(event));
+            } else {
+                for (java.util.ArrayDeque<Operation> redo : history.redoByParticipant.values()) {
+                    if (redo.stream().anyMatch(op -> event.shapeId().equals(op.strokeId()))) {
+                        return;
+                    }
+                }
+                active.put(event.shapeId(), operationOf(event));
+                history.redoByParticipant
+                        .computeIfAbsent(participantId, id -> new java.util.ArrayDeque<>())
+                        .clear();
+            }
+        }
+        messagingTemplate.convertAndSend(
+                "/topic/rooms/" + event.roomId() + "/shape", event);
     }
 
     public void clear(ClearRequest request) {
@@ -289,18 +376,34 @@ public class DrawController {
             long newVersion = roomVersions
                     .computeIfAbsent(request.roomId(), id -> new AtomicLong(0))
                     .incrementAndGet();
-            messagingTemplate.convertAndSend(
-                    "/topic/rooms/" + request.roomId() + "/undo",
-                    new UndoRedoEvent(
-                            redo ? "REDO" : "UNDO",
-                            request.roomId(),
-                            operation.strokeId(),
-                            operation.points(),
-                            operation.color(),
-                            operation.width(),
-                            newVersion
-                    )
-            );
+            if ("SHAPE".equals(operation.elementType())) {
+                ShapeEvent shape = operation.shape();
+                messagingTemplate.convertAndSend(
+                        "/topic/rooms/" + request.roomId() + "/undo",
+                        new ShapeUndoRedoEvent(
+                                redo ? "REDO" : "UNDO",
+                                request.roomId(),
+                                shape.shapeId(),
+                                shape.type(),
+                                shape.x(), shape.y(), shape.width(), shape.height(),
+                                shape.startX(), shape.startY(), shape.endX(), shape.endY(),
+                                shape.radius(), shape.color(), shape.strokeWidth(), newVersion
+                        )
+                );
+            } else {
+                messagingTemplate.convertAndSend(
+                        "/topic/rooms/" + request.roomId() + "/undo",
+                        new UndoRedoEvent(
+                                redo ? "REDO" : "UNDO",
+                                request.roomId(),
+                                operation.strokeId(),
+                                operation.points(),
+                                operation.color(),
+                                operation.width(),
+                                newVersion
+                        )
+                );
+            }
         }
     }
 
@@ -321,10 +424,35 @@ public class DrawController {
 
     private Operation operationOf(DrawEvent event) {
         return new Operation(
+                "STROKE",
                 event.strokeId(),
                 event.points().clone(),
                 event.color(),
-                event.width()
+                event.width(),
+                null
         );
+    }
+
+    private Operation operationOf(ShapeEvent event) {
+        return new Operation("SHAPE", event.shapeId(), null, event.color(), event.strokeWidth(), event);
+    }
+
+    private boolean validGeometry(ShapeEvent event) {
+        double[] values = {
+                event.x(), event.y(), event.width(), event.height(),
+                event.startX(), event.startY(), event.endX(), event.endY(), event.radius()
+        };
+        for (double value : values) {
+            if (!Double.isFinite(value) || Math.abs(value) > 100000) {
+                return false;
+            }
+        }
+        if ("CIRCLE".equals(event.type())) {
+            return event.radius() > 0;
+        }
+        if ("RECTANGLE".equals(event.type())) {
+            return event.width() > 0 && event.height() > 0;
+        }
+        return event.startX() != event.endX() || event.startY() != event.endY();
     }
 }
