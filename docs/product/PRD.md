@@ -3,7 +3,7 @@
 **Phiên bản tài liệu:** 1.0.9  
 **Ngày lập / Cập nhật:** 08/11/2026  
 **Cơ sở kỹ thuật:** Báo cáo System Audit (Stage 0.1), Technical Review v1.0.1–v1.0.6 & Final PRD State-Machine & Event-Recovery Directives v1.0.7 & Final Snapshot Boundary & Undo Versioning Patch v1.0.8 & Final Consistency Patch v1.0.9  
-**Trạng thái:** Chờ phê duyệt chính thức (Pending Final Approval)
+**Trạng thái:** Xác nhận chính thức
 
 ---
 
