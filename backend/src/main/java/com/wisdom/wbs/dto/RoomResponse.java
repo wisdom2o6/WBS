@@ -1,11 +1,19 @@
 package com.wisdom.wbs.dto;
 
-import java.time.LocalDateTime;
+import lombok.Builder;
+import lombok.Data;
 
-public record RoomResponse(
-        String roomId,
-        LocalDateTime createdAt,
-        LocalDateTime updatedAt
-) {
+import java.time.ZonedDateTime;
+import java.util.UUID;
+
+@Data
+@Builder
+public class RoomResponse {
+    private UUID id;
+    private UUID projectId;
+    private String name;
+    private String description;
+    private UUID createdById;
+    private String createdByName;
+    private ZonedDateTime createdAt;
 }
-
