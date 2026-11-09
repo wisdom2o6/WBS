@@ -72,6 +72,11 @@ export const RoomCanvas: React.FC = () => {
   const { token, user } = useAuth();
   const navigate = useNavigate();
 
+  // State Pan & Zoom (Infinite Canvas)
+  const [stageScale, setStageScale] = useState(1);
+  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+
   const [tool, setTool] = useState<'SELECT' | 'FREEHAND' | 'RECTANGLE' | 'CIRCLE' | 'STICKY_NOTE' | 'TEXT' | 'ARROW' | 'ERASER'>('FREEHAND');
   const [color, setColor] = useState('#0052cc');
   const [strokeWidth, setStrokeWidth] = useState(3);
@@ -99,6 +104,15 @@ export const RoomCanvas: React.FC = () => {
     return '#' + '00000'.substring(0, 6 - c.length) + c;
   };
 
+  // Tính tọa độ con trỏ tương đối theo Pan & Zoom
+  const getRelativePointerPosition = (stage: any) => {
+    if (!stage) return { x: 0, y: 0 };
+    const transform = stage.getAbsoluteTransform().copy();
+    transform.invert();
+    const pos = stage.getPointerPosition();
+    return pos ? transform.point(pos) : { x: 0, y: 0 };
+  };
+
   useEffect(() => {
     if (!token || !roomId) return;
 
@@ -109,18 +123,17 @@ export const RoomCanvas: React.FC = () => {
       onConnect: () => {
         // 1. Subscribe nét vẽ
         client.subscribe(`/topic/room.${roomId}`, (message) => {
-        const drawEvent = JSON.parse(message.body);
-        if (drawEvent.senderUsername !== user?.username) {
-          if (drawEvent.type === 'ERASER') {
-            setShapes((prev) => prev.filter((s) => s.id !== drawEvent.payload.id));
-          } else if (drawEvent.type === 'UPDATE') {
-            setShapes((prev) => prev.map((s) => (s.id === drawEvent.payload.id ? drawEvent.payload : s)));
-          } else {
-            // Bao gồm cả 'RECTANGLE', 'CIRCLE', 'FREEHAND', 'STICKY_NOTE', 'TEXT', 'ARROW', 'IMAGE'
-            setShapes((prev) => [...prev, drawEvent.payload]);
+          const drawEvent = JSON.parse(message.body);
+          if (drawEvent.senderUsername !== user?.username) {
+            if (drawEvent.type === 'ERASER') {
+              setShapes((prev) => prev.filter((s) => s.id !== drawEvent.payload.id));
+            } else if (drawEvent.type === 'UPDATE') {
+              setShapes((prev) => prev.map((s) => (s.id === drawEvent.payload.id ? drawEvent.payload : s)));
+            } else {
+              setShapes((prev) => [...prev, drawEvent.payload]);
+            }
           }
-        }
-      });
+        });
 
         // 2. Subscribe con trỏ chuột
         client.subscribe(`/topic/room.${roomId}.cursors`, (message) => {
@@ -214,6 +227,55 @@ export const RoomCanvas: React.FC = () => {
     fetchCanvasHistory();
   }, [roomId, token]);
 
+  // Bắt phím Spacebar để Pan Canvas
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !isSpacePressed) {
+        setIsSpacePressed(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isSpacePressed]);
+
+  // Xử lý Wheel Zoom
+  const handleWheel = (e: any) => {
+    e.evt.preventDefault();
+    const scaleBy = 1.1;
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    let newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
+    newScale = Math.max(0.1, Math.min(5, newScale));
+
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+
+    setStageScale(newScale);
+    setStagePos(newPos);
+  };
+
   const broadcastEvent = (eventType: string, payload: any) => {
     if (stompClientRef.current?.connected && roomId) {
       stompClientRef.current.publish({
@@ -233,48 +295,44 @@ export const RoomCanvas: React.FC = () => {
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file || !token) return;
+    const file = e.target.files?.[0];
+    if (!file || !token) return;
 
-  const formData = new FormData();
-  formData.append('file', file);
+    const formData = new FormData();
+    formData.append('file', file);
 
-  try {
-    // 1. Upload file trực tiếp lên REST API Backend
-    const res = await axios.post('http://localhost:8080/api/v1/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-        Authorization: `Bearer ${token}`,
-      },
-    });
+    try {
+      const res = await axios.post('http://localhost:8080/api/v1/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+          Authorization: `Bearer ${token}`,
+        },
+      });
 
-    const imageUrl = res.data.url; // URL tĩnh: http://localhost:8080/uploads/...
-    const newId = `shape-${Date.now()}`;
+      const imageUrl = res.data.url;
+      const stage = stageRef.current;
+      const pos = getRelativePointerPosition(stage);
 
-    const imgShape: Shape = {
-      id: newId,
-      type: 'IMAGE',
-      x: 100,
-      y: 100,
-      width: 250,
-      height: 250,
-      imageUrl: imageUrl,
-      color: 'transparent',
-    };
+      const newId = `shape-${Date.now()}`;
+      const imgShape: Shape = {
+        id: newId,
+        type: 'IMAGE',
+        x: pos.x || 100,
+        y: pos.y || 100,
+        width: 250,
+        height: 250,
+        imageUrl: imageUrl,
+        color: 'transparent',
+      };
 
-    // 2. Cập nhật state màn hình hiện tại
-    setShapes((prev) => [...prev, imgShape]);
-
-    // 3. Broadcast URL ngắn qua WebSocket và tự động lưu vào PostgreSQL
-    broadcastEvent('IMAGE', imgShape);
-
-    // Reset input file để có thể chọn lại cùng 1 file nếu muốn
-    e.target.value = '';
-  } catch (err) {
-    console.error('Lỗi khi upload ảnh:', err);
-    alert('Không thể tải ảnh lên server');
-  }
-};
+      setShapes((prev) => [...prev, imgShape]);
+      broadcastEvent('IMAGE', imgShape);
+      e.target.value = '';
+    } catch (err) {
+      console.error('Lỗi khi upload ảnh:', err);
+      alert('Không thể tải ảnh lên server');
+    }
+  };
 
   const executeErase = (targetNode: any) => {
     if (!targetNode || tool !== 'ERASER') return;
@@ -289,6 +347,8 @@ export const RoomCanvas: React.FC = () => {
   };
 
   const handleMouseDown = (e: any) => {
+    if (isSpacePressed) return; // Nếu đang đè Spacebar để Pan thì không vẽ
+
     setIsMouseDown(true);
     const clickedOnEmpty = e.target === e.target.getStage();
     if (clickedOnEmpty) setSelectedId(null);
@@ -300,7 +360,7 @@ export const RoomCanvas: React.FC = () => {
 
     if (tool === 'SELECT') return;
 
-    const pos = e.target.getStage().getPointerPosition();
+    const pos = getRelativePointerPosition(stageRef.current);
     const newId = `shape-${Date.now()}`;
 
     if (tool === 'FREEHAND') {
@@ -329,20 +389,20 @@ export const RoomCanvas: React.FC = () => {
   };
 
   const handleMouseMove = (e: any) => {
-    // Broadcast vị trí chuột
-    const now = Date.now();
-    if (now - lastCursorSend.current > 30 && stompClientRef.current?.connected && roomId) {
-      lastCursorSend.current = now;
-      const pos = e.target.getStage().getPointerPosition();
-      if (pos) {
+    const stage = stageRef.current;
+    if (stage) {
+      const relPos = getRelativePointerPosition(stage);
+      const now = Date.now();
+      if (now - lastCursorSend.current > 30 && stompClientRef.current?.connected && roomId) {
+        lastCursorSend.current = now;
         stompClientRef.current.publish({
           destination: `/app/room.${roomId}.cursor`,
-          body: JSON.stringify({ x: pos.x, y: pos.y }),
+          body: JSON.stringify({ x: relPos.x, y: relPos.y }),
         });
       }
     }
 
-    if (!isMouseDown) return;
+    if (!isMouseDown || isSpacePressed) return;
 
     if (tool === 'ERASER') {
       executeErase(e.target);
@@ -351,7 +411,7 @@ export const RoomCanvas: React.FC = () => {
 
     if (tool === 'SELECT' || tool === 'STICKY_NOTE' || tool === 'TEXT') return;
 
-    const pos = e.target.getStage().getPointerPosition();
+    const pos = getRelativePointerPosition(stage);
     const lastIndex = shapes.length - 1;
     if (lastIndex < 0) return;
 
@@ -437,7 +497,6 @@ export const RoomCanvas: React.FC = () => {
             </button>
           ))}
 
-          {/* Nút upload ảnh */}
           <button
             onClick={() => fileInputRef.current?.click()}
             style={{ padding: '6px 12px', background: '#ec4899', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}
@@ -449,6 +508,17 @@ export const RoomCanvas: React.FC = () => {
 
         {/* Dynamic Online Users & Controls */}
         <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+          {/* Zoom Controls */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f1f5f9', padding: '4px 8px', borderRadius: '6px', fontSize: '13px' }}>
+            <span>🔍 {Math.round(stageScale * 100)}%</span>
+            <button
+              onClick={() => { setStageScale(1); setStagePos({ x: 0, y: 0 }); }}
+              style={{ padding: '2px 6px', background: '#cbd5e1', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
+            >
+              Reset
+            </button>
+          </div>
+
           {/* Widget Danh sách Online */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#f1f5f9', padding: '4px 10px', borderRadius: '20px' }}>
             <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>Online:</span>
@@ -478,14 +548,26 @@ export const RoomCanvas: React.FC = () => {
           ref={stageRef}
           width={window.innerWidth}
           height={window.innerHeight - 60}
+          x={stagePos.x}
+          y={stagePos.y}
+          scaleX={stageScale}
+          scaleY={stageScale}
+          draggable={isSpacePressed || tool === 'SELECT'}
+          onWheel={handleWheel}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onDragEnd={(e) => {
+            if (e.target === stageRef.current) {
+              setStagePos({ x: e.target.x(), y: e.target.y() });
+            }
+          }}
+          style={{ cursor: isSpacePressed ? 'grab' : 'default' }}
         >
           <Layer>
             {/* Shapes */}
             {shapes.map((s) => {
-              const isDraggable = tool === 'SELECT';
+              const isDraggable = tool === 'SELECT' && !isSpacePressed;
               if (s.type === 'FREEHAND' && s.points) {
                 return <Line key={s.id} id={s.id} points={s.points} stroke={s.color} strokeWidth={s.strokeWidth || 3} tension={0.5} lineCap="round" lineJoin="round" draggable={isDraggable} onDragEnd={(e) => handleDragEnd(e, s)} onClick={() => setSelectedId(s.id)} onMouseEnter={handleShapeHover} />;
               } else if (s.type === 'RECTANGLE') {
@@ -509,7 +591,7 @@ export const RoomCanvas: React.FC = () => {
               return null;
             })}
 
-            {tool === 'SELECT' && selectedId && <Transformer ref={transformerRef} />}
+            {tool === 'SELECT' && selectedId && !isSpacePressed && <Transformer ref={transformerRef} />}
 
             {/* Live Cursors */}
             {Object.values(cursors).map((c) => (
