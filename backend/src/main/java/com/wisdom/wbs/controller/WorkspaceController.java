@@ -84,4 +84,46 @@ public class WorkspaceController {
         return ResponseEntity.ok(canvasPersistenceService.getRoomCanvasShapes(roomId));
     }
 
+    // UPDATE Workspace
+    @PutMapping("/workspaces/{id}")
+    public ResponseEntity<?> updateWorkspace(@PathVariable UUID id, @RequestBody Map<String, String> body) {
+        workspaceService.updateWorkspace(id, body.get("name"), body.get("description"));
+        return ResponseEntity.ok(Map.of("message", "Cập nhật Workspace thành công"));
+    }
+
+    // DELETE Workspace
+    @DeleteMapping("/workspaces/{id}")
+    public ResponseEntity<?> deleteWorkspace(@PathVariable UUID id) {
+        workspaceService.deleteWorkspace(id);
+        return ResponseEntity.ok(Map.of("message", "Xóa Workspace thành công"));
+    }
+
+    // UPDATE Project
+    @PutMapping("/projects/{id}")
+    public ResponseEntity<?> updateProject(@PathVariable UUID id, @RequestBody Map<String, String> body) {
+        workspaceService.updateProject(id, body.get("name"));
+        return ResponseEntity.ok(Map.of("message", "Cập nhật Project thành công"));
+    }
+
+    // DELETE Project
+    @DeleteMapping("/projects/{id}")
+    public ResponseEntity<?> deleteProject(@PathVariable UUID id) {
+        workspaceService.deleteProject(id);
+        return ResponseEntity.ok(Map.of("message", "Xóa Project thành công"));
+    }
+
+    // UPDATE Room
+    @PutMapping("/rooms/{id}")
+    public ResponseEntity<?> updateRoom(@PathVariable UUID id, @RequestBody Map<String, String> body) {
+        workspaceService.updateRoom(id, body.get("name"));
+        return ResponseEntity.ok(Map.of("message", "Cập nhật Room thành công"));
+    }
+
+    // DELETE Room
+    @DeleteMapping("/rooms/{id}")
+    public ResponseEntity<?> deleteRoom(@PathVariable UUID id) {
+        workspaceService.deleteRoom(id);
+        return ResponseEntity.ok(Map.of("message", "Xóa Room thành công"));
+    }
+
 }

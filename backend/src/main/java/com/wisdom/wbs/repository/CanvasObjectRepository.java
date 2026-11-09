@@ -11,4 +11,5 @@ import java.util.UUID;
 public interface CanvasObjectRepository extends JpaRepository<CanvasObject, String> {
     List<CanvasObject> findByRoomIdOrderByCreatedAtAsc(UUID roomId);
     void deleteByRoomIdAndId(UUID roomId, String id);
+    void deleteByRoomId(UUID roomId);
 }

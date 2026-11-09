@@ -5,6 +5,7 @@ import SockJS from 'sockjs-client';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { Stage, Layer, Rect, Circle, Line, Text, Group, Arrow, Transformer, Image as KonvaImage } from 'react-konva';
+import jsPDF from 'jspdf';
 
 interface ChatMessage {
   senderUsername: string;
@@ -458,6 +459,44 @@ export const RoomCanvas: React.FC = () => {
     }
   };
 
+  const handleExportPNG = () => {
+  const stage = stageRef.current;
+  if (!stage) return;
+
+  // Tạm thời ẩn Transformer selector nếu đang chọn shape
+  setSelectedId(null);
+
+  setTimeout(() => {
+    // Xuất hình ảnh với độ phân giải cao (pixelRatio: 2)
+    const dataURL = stage.toDataURL({ pixelRatio: 2 });
+    const link = document.createElement('a');
+    link.download = `canvas-room-${roomId}-${Date.now()}.png`;
+    link.href = dataURL;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, 50);
+};
+
+  const handleExportPDF = () => {
+  const stage = stageRef.current;
+  if (!stage) return;
+
+  setSelectedId(null);
+
+  setTimeout(() => {
+    const dataURL = stage.toDataURL({ pixelRatio: 2 });
+    const pdf = new jsPDF({
+      orientation: 'landscape',
+      unit: 'px',
+      format: [stage.width(), stage.height()],
+    });
+
+    pdf.addImage(dataURL, 'PNG', 0, 0, stage.width(), stage.height());
+    pdf.save(`canvas-room-${roomId}-${Date.now()}.pdf`);
+  }, 50);
+};
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8f9fa', position: 'relative' }}>
       {/* Header Toolbar */}
@@ -539,6 +578,40 @@ export const RoomCanvas: React.FC = () => {
             <input type="range" min="1" max="10" value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))} style={{ width: '70px' }} />
           </label>
           <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: '32px', height: '32px', border: 'none', cursor: 'pointer', background: 'transparent' }} />
+        </div>
+
+        {/* Export Toolbar Button */}
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+          <button
+            onClick={handleExportPNG}
+            style={{
+              padding: '6px 10px',
+              background: '#10b981',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '12px',
+            }}
+          >
+            📥 PNG
+          </button>
+          <button
+            onClick={handleExportPDF}
+            style={{
+              padding: '6px 10px',
+              background: '#ef4444',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '12px',
+            }}
+          >
+            📄 PDF
+          </button>
         </div>
       </div>
 

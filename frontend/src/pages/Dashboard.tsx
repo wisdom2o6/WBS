@@ -1,250 +1,269 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
+
+interface Room {
+  id: string;
+  name: string;
+}
+
+interface Project {
+  id: string;
+  name: string;
+  rooms: Room[];
+}
+
+interface Workspace {
+  id: string;
+  name: string;
+  description: string;
+  projects: Project[];
+}
 
 export const Dashboard: React.FC = () => {
-  const { token, logout } = useAuth();
+  const { token, user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [workspaces, setWorkspaces] = useState<any[]>([]);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<any>(null);
-  const [projects, setProjects] = useState<any[]>([]);
-  const [selectedProject, setSelectedProject] = useState<any>(null);
-  const [rooms, setRooms] = useState<any[]>([]);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWs, setSelectedWs] = useState<Workspace | null>(null);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
-  const [newWorkspaceName, setNewWorkspaceName] = useState('');
-  const [newProjectName, setNewProjectName] = useState('');
-  const [newRoomName, setNewRoomName] = useState('');
-  
-  // State mời thành viên
-  const [inviteInput, setInviteInput] = useState('');
-  const [inviteMsg, setInviteMsg] = useState('');
-
-  const axiosConfig = {
-    headers: { Authorization: `Bearer ${token}` }
-  };
+  // Custom Headers Cho Axios
+  const authHeaders = { headers: { Authorization: `Bearer ${token}` } };
 
   const fetchWorkspaces = async () => {
     try {
-      const res = await axios.get('http://localhost:8080/api/v1/workspaces', axiosConfig);
+      const res = await axios.get('http://localhost:8080/api/v1/workspaces', authHeaders);
       setWorkspaces(res.data);
+      if (res.data.length > 0 && !selectedWs) {
+        setSelectedWs(res.data[0]);
+      }
     } catch (err) {
-      console.error(err);
+      console.error('Lỗi tải danh sách Workspace:', err);
     }
   };
 
   useEffect(() => {
-    fetchWorkspaces();
-  }, []);
+    if (token) fetchWorkspaces();
+  }, [token]);
 
-  const selectWorkspace = async (ws: any) => {
-    setSelectedWorkspace(ws);
-    setSelectedProject(null);
-    setRooms([]);
-    setInviteMsg('');
-    try {
-      const res = await axios.get(`http://localhost:8080/api/v1/workspaces/${ws.id}/projects`, axiosConfig);
-      setProjects(res.data);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const selectProject = async (pj: any) => {
-    setSelectedProject(pj);
-    try {
-      const res = await axios.get(`http://localhost:8080/api/v1/projects/${pj.id}/rooms`, axiosConfig);
-      setRooms(res.data);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
+  // --- CRUD WORKSPACE ---
   const handleCreateWorkspace = async () => {
-    if (!newWorkspaceName.trim()) return;
+    const name = prompt('Nhập tên Workspace mới:');
+    if (!name) return;
+    const description = prompt('Nhập mô tả Workspace (tùy chọn):') || '';
     try {
-      await axios.post('http://localhost:8080/api/v1/workspaces', { name: newWorkspaceName }, axiosConfig);
-      setNewWorkspaceName('');
+      await axios.post('http://localhost:8080/api/v1/workspaces', { name, description }, authHeaders);
       fetchWorkspaces();
-    } catch (err) {
-      alert('Không thể tạo Workspace');
-    }
+    } catch (err) { alert('Lỗi khi tạo Workspace'); }
   };
 
+  const handleUpdateWorkspace = async (ws: Workspace) => {
+    const newName = prompt('Nhập tên mới cho Workspace:', ws.name);
+    if (!newName) return;
+    const newDesc = prompt('Nhập mô tả mới:', ws.description || '') ?? '';
+    try {
+      await axios.put(`http://localhost:8080/api/v1/workspaces/${ws.id}`, { name: newName, description: newDesc }, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi cập nhật Workspace'); }
+  };
+
+  const handleDeleteWorkspace = async (wsId: string) => {
+    if (!window.confirm('Bạn có chắc muốn xóa Workspace này cùng tất cả Project & Room bên trong?')) return;
+    try {
+      await axios.delete(`http://localhost:8080/api/v1/workspaces/${wsId}`, authHeaders);
+      if (selectedWs?.id === wsId) setSelectedWs(null);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi xóa Workspace'); }
+  };
+
+  // --- CRUD PROJECT ---
   const handleCreateProject = async () => {
-    if (!newProjectName.trim() || !selectedWorkspace) return;
+    if (!selectedWs) return alert('Vui lòng chọn Workspace trước!');
+    const name = prompt('Nhập tên Project mới:');
+    if (!name) return;
     try {
-      await axios.post(`http://localhost:8080/api/v1/workspaces/${selectedWorkspace.id}/projects`, { name: newProjectName }, axiosConfig);
-      setNewProjectName('');
-      selectWorkspace(selectedWorkspace);
-    } catch (err) {
-      alert('Không thể tạo Project');
-    }
+      await axios.post('http://localhost:8080/api/v1/projects', { name, workspaceId: selectedWs.id }, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi tạo Project'); }
   };
 
-  const handleCreateRoom = async () => {
-    if (!newRoomName.trim() || !selectedProject) return;
+  const handleUpdateProject = async (proj: Project) => {
+    const newName = prompt('Nhập tên mới cho Project:', proj.name);
+    if (!newName) return;
     try {
-      await axios.post(`http://localhost:8080/api/v1/projects/${selectedProject.id}/rooms`, { name: newRoomName }, axiosConfig);
-      setNewRoomName('');
-      selectProject(selectedProject);
-    } catch (err) {
-      alert('Không thể tạo Room');
-    }
+      await axios.put(`http://localhost:8080/api/v1/projects/${proj.id}`, { name: newName }, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi cập nhật Project'); }
   };
 
-  // Hàm mời thành viên
-  const handleInviteMember = async () => {
-    if (!inviteInput.trim() || !selectedWorkspace) return;
+  const handleDeleteProject = async (projId: string) => {
+    if (!window.confirm('Bạn có chắc muốn xóa Project này?')) return;
     try {
-      await axios.post(
-        `http://localhost:8080/api/v1/workspaces/${selectedWorkspace.id}/members`,
-        { usernameOrEmail: inviteInput },
-        axiosConfig
-      );
-      setInviteMsg(`✅ Đã thêm ${inviteInput} vào Workspace thành công!`);
-      setInviteInput('');
-    } catch (err: any) {
-      setInviteMsg(`❌ ${err.response?.data?.message || 'Không thể thêm thành viên'}`);
-    }
+      await axios.delete(`http://localhost:8080/api/v1/projects/${projId}`, authHeaders);
+      if (selectedProject?.id === projId) setSelectedProject(null);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi xóa Project'); }
+  };
+
+  // --- CRUD ROOM ---
+  const handleCreateRoom = async (projId: string) => {
+    const name = prompt('Nhập tên Phòng Canvas mới:');
+    if (!name) return;
+    try {
+      await axios.post('http://localhost:8080/api/v1/rooms', { name, projectId: projId }, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi tạo Phòng'); }
+  };
+
+  const handleUpdateRoom = async (room: Room) => {
+    const newName = prompt('Nhập tên mới cho Room:', room.name);
+    if (!newName) return;
+    try {
+      await axios.put(`http://localhost:8080/api/v1/rooms/${room.id}`, { name: newName }, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi cập nhật Room'); }
+  };
+
+  const handleDeleteRoom = async (roomId: string) => {
+    if (!window.confirm('Bạn có chắc muốn xóa Phòng bảng vẽ này?')) return;
+    try {
+      await axios.delete(`http://localhost:8080/api/v1/rooms/${roomId}`, authHeaders);
+      fetchWorkspaces();
+    } catch (err) { alert('Lỗi khi xóa Room'); }
   };
 
   return (
-    <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
-      {/* Sidebar Trai */}
-      <div style={{ width: '260px', background: '#1e1e2d', color: '#fff', padding: '1rem', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', background: '#f8fafc' }}>
+      {/* Sidebar: Workspaces */}
+      <div style={{ width: '280px', background: '#0f172a', color: '#fff', padding: '1.2rem', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-          <h3 style={{ margin: 0 }}>Visual Workspace</h3>
-          <button onClick={logout} style={{ background: '#f5222d', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer' }}>Thoát</button>
+          <h3 style={{ margin: 0, fontSize: '18px', color: '#38bdf8' }}>🎨 Visual Space</h3>
+          <button onClick={logout} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Đăng xuất</button>
         </div>
 
-        <div style={{ marginBottom: '1rem' }}>
-          <input
-            type="text"
-            placeholder="Tên Workspace..."
-            value={newWorkspaceName}
-            onChange={(e) => setNewWorkspaceName(e.target.value)}
-            style={{ width: '100%', padding: '8px', boxSizing: 'border-box', marginBottom: '6px', borderRadius: '4px', border: '1px solid #444' }}
-          />
-          <button onClick={handleCreateWorkspace} style={{ width: '100%', padding: '8px', background: '#3699ff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-            + Workspace
-          </button>
+        <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '1rem' }}>Tài khoản: <b>{user?.username}</b></div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+          <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#cbd5e1' }}>WORKSPACES</span>
+          <button onClick={handleCreateWorkspace} style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>+ Tạo mới</button>
         </div>
 
-        <h4>DANH SÁCH WORKSPACE</h4>
-        <div style={{ flex: 1, overflowY: 'auto' }}>
+        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {workspaces.map((ws) => (
             <div
               key={ws.id}
-              onClick={() => selectWorkspace(ws)}
+              onClick={() => { setSelectedWs(ws); setSelectedProject(null); }}
               style={{
-                padding: '10px',
-                marginBottom: '6px',
-                borderRadius: '6px',
-                background: selectedWorkspace?.id === ws.id ? '#3699ff' : '#2b2b40',
+                padding: '10px 12px',
+                borderRadius: '8px',
+                background: selectedWs?.id === ws.id ? '#1e293b' : 'transparent',
+                borderLeft: selectedWs?.id === ws.id ? '4px solid #38bdf8' : '4px solid transparent',
                 cursor: 'pointer',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
               }}
             >
-              📁 {ws.name} <small style={{ opacity: 0.7 }}>({ws.currentUserRole})</small>
+              <div>
+                <div style={{ fontWeight: 'bold', fontSize: '14px', color: selectedWs?.id === ws.id ? '#fff' : '#cbd5e1' }}>{ws.name}</div>
+                <div style={{ fontSize: '11px', color: '#64748b' }}>{ws.description || 'Không có mô tả'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button onClick={(e) => { e.stopPropagation(); handleUpdateWorkspace(ws); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                <button onClick={(e) => { e.stopPropagation(); handleDeleteWorkspace(ws.id); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+              </div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Main Content Phai */}
-      <div style={{ flex: 1, padding: '2rem', background: '#f5f7fa', overflowY: 'auto' }}>
-        {selectedWorkspace ? (
+      {/* Main Panel: Projects & Rooms */}
+      <div style={{ flex: 1, padding: '2rem', overflowY: 'auto' }}>
+        {selectedWs ? (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
-              <h2>Workspace: {selectedWorkspace.name}</h2>
-              
-              {/* Box Mời Thành Viên */}
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: '#fff', padding: '8px 12px', borderRadius: '6px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-                <input
-                  type="text"
-                  placeholder="Nhập Username/Email TV..."
-                  value={inviteInput}
-                  onChange={(e) => setInviteInput(e.target.value)}
-                  style={{ padding: '6px 10px', border: '1px solid #cbd5e1', borderRadius: '4px' }}
-                />
-                <button onClick={handleInviteMember} style={{ padding: '6px 12px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                  + Mời Thành Viên
-                </button>
+              <div>
+                <h2 style={{ margin: 0, color: '#0f172a' }}>{selectedWs.name}</h2>
+                <p style={{ margin: '4px 0 0 0', color: '#64748b', fontSize: '14px' }}>{selectedWs.description}</p>
               </div>
-            </div>
-
-            {inviteMsg && <p style={{ color: inviteMsg.startsWith('✅') ? 'green' : 'red', fontWeight: 'bold' }}>{inviteMsg}</p>}
-
-            {/* Danh sach Projects */}
-            <h3>Dự án (Projects)</h3>
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '1.5rem' }}>
-              <input
-                type="text"
-                placeholder="Tên Project mới..."
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '4px', width: '250px' }}
-              />
-              <button onClick={handleCreateProject} style={{ padding: '8px 16px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                + Tạo Project
+              <button onClick={handleCreateProject} style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+                + Tạo Project Mới
               </button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
-              {projects.map((pj) => (
-                <div
-                  key={pj.id}
-                  onClick={() => selectProject(pj)}
-                  style={{
-                    padding: '1rem',
-                    background: selectedProject?.id === pj.id ? '#e0e7ff' : '#fff',
-                    border: selectedProject?.id === pj.id ? '2px solid #6366f1' : '1px solid #e2e8f0',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  📁 <strong>{pj.name}</strong>
-                  <p style={{ fontSize: '12px', color: '#64748b', margin: '4px 0 0 0' }}>Click để xem Rooms</p>
+            {/* Projects List */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {selectedWs.projects?.map((proj) => (
+                <div key={proj.id} style={{ background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '1.2rem', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h3 style={{ margin: 0, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      📁 {proj.name}
+                      <button onClick={() => handleUpdateProject(proj)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px' }}>✏️</button>
+                      <button onClick={() => handleDeleteProject(proj.id)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px' }}>🗑️</button>
+                    </h3>
+                    <button onClick={() => handleCreateRoom(proj.id)} style={{ background: '#f1f5f9', color: '#2563eb', border: '1px solid #cbd5e1', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
+                      + Thêm Phòng Canvas
+                    </button>
+                  </div>
+
+                  {/* Rooms Grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '1rem' }}>
+                    {proj.rooms?.map((room) => (
+                      <div
+                        key={room.id}
+                        style={{
+                          background: '#f8fafc',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: '8px',
+                          padding: '1rem',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          height: '100px',
+                          position: 'relative'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                          <div style={{ fontWeight: 'bold', color: '#334155', fontSize: '15px' }}>🖼️ {room.name}</div>
+                          <div style={{ display: 'flex', gap: '2px' }}>
+                            <button onClick={() => handleUpdateRoom(room)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                            <button onClick={() => handleDeleteRoom(room.id)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => navigate(`/room/${room.id}`)}
+                          style={{
+                            background: '#2563eb',
+                            color: '#fff',
+                            border: 'none',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            fontWeight: 'bold',
+                            fontSize: '12px',
+                            width: '100%'
+                          }}
+                        >
+                          Vào Bảng Vẽ →
+                        </button>
+                      </div>
+                    ))}
+                    {(!proj.rooms || proj.rooms.length === 0) && (
+                      <div style={{ color: '#94a3b8', fontSize: '13px', fontStyle: 'italic', gridColumn: '1/-1' }}>Chưa có phòng vẽ nào trong Project này.</div>
+                    )}
+                  </div>
                 </div>
               ))}
+              {(!selectedWs.projects || selectedWs.projects.length === 0) && (
+                <div style={{ textAlign: 'center', padding: '3rem', color: '#94a3b8' }}>Workspace này chưa có Project nào. Hãy bấm nút "+ Tạo Project Mới" ở trên!</div>
+              )}
             </div>
-
-            {/* Danh sach Rooms */}
-            {selectedProject && (
-              <div>
-                <h3>Phòng làm việc (Rooms) trong {selectedProject.name}</h3>
-                <div style={{ display: 'flex', gap: '10px', marginBottom: '1.5rem' }}>
-                  <input
-                    type="text"
-                    placeholder="Tên Room mới..."
-                    value={newRoomName}
-                    onChange={(e) => setNewRoomName(e.target.value)}
-                    style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '4px', width: '250px' }}
-                  />
-                  <button onClick={handleCreateRoom} style={{ padding: '8px 16px', background: '#8b5cf6', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                    + Tạo Room
-                  </button>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '1rem' }}>
-                  {rooms.map((r) => (
-                    <div key={r.id} style={{ padding: '1rem', background: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-                      🎨 <strong>{r.name}</strong>
-                      <button
-                        onClick={() => navigate(`/room/${r.id}`)}
-                        style={{ marginTop: '0.75rem', width: '100%', padding: '8px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-                      >
-                        Vào Phòng Làm Việc
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         ) : (
-          <p style={{ color: '#64748b' }}>Vui lòng chọn hoặc tạo mới 1 Workspace bên thanh trái.</p>
+          <div style={{ textAlign: 'center', padding: '4rem', color: '#94a3b8' }}>Chọn một Workspace bên trái để bắt đầu quản lý.</div>
         )}
       </div>
     </div>
