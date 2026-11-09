@@ -1,6 +1,7 @@
 package com.wisdom.wbs.controller;
 
 import com.wisdom.wbs.dto.CanvasDrawEvent;
+import com.wisdom.wbs.dto.ChatMessageEvent;
 import com.wisdom.wbs.service.CanvasPersistenceService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.messaging.handler.annotation.DestinationVariable;
@@ -45,4 +46,19 @@ public class CanvasRealtimeController {
         // Explicitly cast to Object to resolve method ambiguity
         messagingTemplate.convertAndSend("/topic/room." + roomId + ".cursors", (Object) cursorData);
     }
+
+    @MessageMapping("/room.{roomId}.chat")
+    public void handleChatMessage(@DestinationVariable String roomId,
+                                @Payload ChatMessageEvent chatMessage,
+                                Principal principal) {
+        if (principal != null) {
+            chatMessage.setSenderUsername(principal.getName());
+        }
+        chatMessage.setRoomId(roomId);
+        chatMessage.setTimestamp(java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")));
+        
+        // Broadcast tin nhắn chat đến tất cả thành viên trong room
+        messagingTemplate.convertAndSend("/topic/room." + roomId + ".chat", chatMessage);
+    }
+
 }

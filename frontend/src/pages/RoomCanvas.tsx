@@ -1,14 +1,20 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Stage, Layer, Rect, Circle, Line, Text, Group, Arrow, Transformer } from 'react-konva';
 import { Client } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { Stage, Layer, Rect, Circle, Line, Text, Group, Arrow, Transformer, Image as KonvaImage } from 'react-konva';
+
+interface ChatMessage {
+  senderUsername: string;
+  message: string;
+  timestamp: string;
+}
 
 interface Shape {
   id: string;
-  type: 'RECTANGLE' | 'CIRCLE' | 'FREEHAND' | 'STICKY_NOTE' | 'TEXT' | 'ARROW';
+  type: 'RECTANGLE' | 'CIRCLE' | 'FREEHAND' | 'STICKY_NOTE' | 'TEXT' | 'ARROW' | 'IMAGE';
   x?: number;
   y?: number;
   width?: number;
@@ -16,6 +22,7 @@ interface Shape {
   radius?: number;
   points?: number[];
   text?: string;
+  imageUrl?: string;
   color: string;
   strokeWidth?: number;
 }
@@ -28,6 +35,38 @@ interface UserCursor {
   lastActive?: number;
 }
 
+// Component phụ render Ảnh trên Konva Canvas
+const URLImage: React.FC<{ shape: Shape; isDraggable: boolean; onDragEnd: any; onClick: any; onMouseEnter: any }> = ({ shape, isDraggable, onDragEnd, onClick, onMouseEnter }) => {
+  const [image, setImage] = useState<HTMLImageElement | undefined>(undefined);
+
+  useEffect(() => {
+    if (!shape.imageUrl) return;
+    const img = new window.Image();
+    img.src = shape.imageUrl;
+    img.onload = () => {
+      setImage(img);
+    };
+  }, [shape.imageUrl]);
+
+  if (!image) return null;
+
+  return (
+    <KonvaImage
+      key={shape.id}
+      id={shape.id}
+      image={image}
+      x={shape.x}
+      y={shape.y}
+      width={shape.width || 200}
+      height={shape.height || 200}
+      draggable={isDraggable}
+      onDragEnd={onDragEnd}
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+    />
+  );
+};
+
 export const RoomCanvas: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
   const { token, user } = useAuth();
@@ -39,6 +78,12 @@ export const RoomCanvas: React.FC = () => {
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [isMouseDown, setIsMouseDown] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Chat & File Upload State
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const stompClientRef = useRef<Client | null>(null);
   const stageRef = useRef<any>(null);
@@ -64,17 +109,18 @@ export const RoomCanvas: React.FC = () => {
       onConnect: () => {
         // 1. Subscribe nét vẽ
         client.subscribe(`/topic/room.${roomId}`, (message) => {
-          const drawEvent = JSON.parse(message.body);
-          if (drawEvent.senderUsername !== user?.username) {
-            if (drawEvent.type === 'ERASER') {
-              setShapes((prev) => prev.filter((s) => s.id !== drawEvent.payload.id));
-            } else if (drawEvent.type === 'UPDATE') {
-              setShapes((prev) => prev.map((s) => (s.id === drawEvent.payload.id ? drawEvent.payload : s)));
-            } else {
-              setShapes((prev) => [...prev, drawEvent.payload]);
-            }
+        const drawEvent = JSON.parse(message.body);
+        if (drawEvent.senderUsername !== user?.username) {
+          if (drawEvent.type === 'ERASER') {
+            setShapes((prev) => prev.filter((s) => s.id !== drawEvent.payload.id));
+          } else if (drawEvent.type === 'UPDATE') {
+            setShapes((prev) => prev.map((s) => (s.id === drawEvent.payload.id ? drawEvent.payload : s)));
+          } else {
+            // Bao gồm cả 'RECTANGLE', 'CIRCLE', 'FREEHAND', 'STICKY_NOTE', 'TEXT', 'ARROW', 'IMAGE'
+            setShapes((prev) => [...prev, drawEvent.payload]);
           }
-        });
+        }
+      });
 
         // 2. Subscribe con trỏ chuột
         client.subscribe(`/topic/room.${roomId}.cursors`, (message) => {
@@ -103,6 +149,12 @@ export const RoomCanvas: React.FC = () => {
               return next;
             });
           }
+        });
+
+        // 4. Subscribe Room Chat
+        client.subscribe(`/topic/room.${roomId}.chat`, (message) => {
+          const chatEvt = JSON.parse(message.body);
+          setMessages((prev) => [...prev, chatEvt]);
         });
       },
     });
@@ -170,6 +222,59 @@ export const RoomCanvas: React.FC = () => {
       });
     }
   };
+
+  const handleSendMessage = () => {
+    if (!chatInput.trim() || !stompClientRef.current?.connected || !roomId) return;
+    stompClientRef.current.publish({
+      destination: `/app/room.${roomId}.chat`,
+      body: JSON.stringify({ message: chatInput }),
+    });
+    setChatInput('');
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  if (!file || !token) return;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    // 1. Upload file trực tiếp lên REST API Backend
+    const res = await axios.post('http://localhost:8080/api/v1/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const imageUrl = res.data.url; // URL tĩnh: http://localhost:8080/uploads/...
+    const newId = `shape-${Date.now()}`;
+
+    const imgShape: Shape = {
+      id: newId,
+      type: 'IMAGE',
+      x: 100,
+      y: 100,
+      width: 250,
+      height: 250,
+      imageUrl: imageUrl,
+      color: 'transparent',
+    };
+
+    // 2. Cập nhật state màn hình hiện tại
+    setShapes((prev) => [...prev, imgShape]);
+
+    // 3. Broadcast URL ngắn qua WebSocket và tự động lưu vào PostgreSQL
+    broadcastEvent('IMAGE', imgShape);
+
+    // Reset input file để có thể chọn lại cùng 1 file nếu muốn
+    e.target.value = '';
+  } catch (err) {
+    console.error('Lỗi khi upload ảnh:', err);
+    alert('Không thể tải ảnh lên server');
+  }
+};
 
   const executeErase = (targetNode: any) => {
     if (!targetNode || tool !== 'ERASER') return;
@@ -294,7 +399,7 @@ export const RoomCanvas: React.FC = () => {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8f9fa' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8f9fa', position: 'relative' }}>
       {/* Header Toolbar */}
       <div style={{ padding: '0.6rem 1.2rem', background: '#ffffff', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -331,6 +436,15 @@ export const RoomCanvas: React.FC = () => {
               {t.label}
             </button>
           ))}
+
+          {/* Nút upload ảnh */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            style={{ padding: '6px 12px', background: '#ec4899', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}
+          >
+            🖼️ Chèn Ảnh
+          </button>
+          <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" style={{ display: 'none' }} />
         </div>
 
         {/* Dynamic Online Users & Controls */}
@@ -389,6 +503,8 @@ export const RoomCanvas: React.FC = () => {
                 );
               } else if (s.type === 'TEXT') {
                 return <Text key={s.id} id={s.id} x={s.x} y={s.y} text={s.text} fontSize={18} fontFamily="sans-serif" fill={s.color} draggable={isDraggable} onDragEnd={(e) => handleDragEnd(e, s)} onClick={() => setSelectedId(s.id)} onMouseEnter={handleShapeHover} />;
+              } else if (s.type === 'IMAGE') {
+                return <URLImage key={s.id} shape={s} isDraggable={isDraggable} onDragEnd={(e: any) => handleDragEnd(e, s)} onClick={() => setSelectedId(s.id)} onMouseEnter={handleShapeHover} />;
               }
               return null;
             })}
@@ -405,6 +521,50 @@ export const RoomCanvas: React.FC = () => {
             ))}
           </Layer>
         </Stage>
+      </div>
+
+      {/* Floating Chat Widget */}
+      <div style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 10 }}>
+        {!isChatOpen ? (
+          <button
+            onClick={() => setIsChatOpen(true)}
+            style={{ padding: '12px 20px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: '30px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}
+          >
+            💬 Chat Room ({messages.length})
+          </button>
+        ) : (
+          <div style={{ width: '320px', height: '400px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '12px', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 25px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
+            <div style={{ padding: '10px 14px', background: '#2563eb', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}>
+              <span>💬 Room Chat</span>
+              <button onClick={() => setIsChatOpen(false)} style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '16px' }}>✕</button>
+            </div>
+
+            <div style={{ flex: 1, padding: '12px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {messages.map((m, idx) => (
+                <div key={idx} style={{ alignSelf: m.senderUsername === user?.username ? 'flex-end' : 'flex-start', maxWidth: '80%' }}>
+                  <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '2px', textAlign: m.senderUsername === user?.username ? 'right' : 'left' }}>
+                    {m.senderUsername} • {m.timestamp}
+                  </div>
+                  <div style={{ padding: '8px 12px', borderRadius: '12px', background: m.senderUsername === user?.username ? '#2563eb' : '#f1f5f9', color: m.senderUsername === user?.username ? '#fff' : '#1e293b', fontSize: '13px' }}>
+                    {m.message}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ padding: '8px 10px', borderTop: '1px solid #e2e8f0', display: 'flex', gap: '6px' }}>
+              <input
+                type="text"
+                placeholder="Nhập tin nhắn..."
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                style={{ flex: 1, padding: '8px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '13px' }}
+              />
+              <button onClick={handleSendMessage} style={{ padding: '8px 12px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Gửi</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -24,7 +24,7 @@ public class CanvasObject {
     @Column(nullable = false)
     private String type; // RECTANGLE, CIRCLE, FREEHAND, STICKY_NOTE, TEXT, ARROW
 
-    @Column(columnDefinition = "TEXT", nullable = false)
+    @Column(name = "payload_json", columnDefinition = "TEXT", nullable = false)
     private String payloadJson; // Chuỗi JSON chứa tọa độ, màu sắc, points, text,...
 
     @Column(name = "created_at")
