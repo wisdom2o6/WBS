@@ -1,0 +1,6 @@
+{
+  "installOn": [
+    "frontend/package.json",
+    "frontend/package-lock.json"
+  ]
+}
