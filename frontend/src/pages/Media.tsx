@@ -1,5 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import axios from "axios";
+import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
   Button,
@@ -15,11 +17,12 @@ import {
   useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { errorMessage, workspaceService } from "../services/workspace";
+import { errorMessage } from "../services/workspace";
 import type { Asset } from "../types/workspace";
 
 export default function Media({ roomId }: { roomId?: string }) {
   const { assets, setAssets, workspace, demo, logActivity } = useWorkspace();
+  const { token } = useAuth();
   const [params] = useSearchParams();
   const [query, setQuery] = useState("");
   const [type, setType] = useState("all");
@@ -37,11 +40,50 @@ export default function Media({ roomId }: { roomId?: string }) {
   const [projectId, setProjectId] = useState(params.get("project") || "");
   const input = useRef<HTMLInputElement>(null);
   const toast = useToast();
+
+  // Helper chuyển đổi dữ liệu từ RoomFile (DB Backend) sang Asset (Frontend)
+  const mapRoomFileToAsset = (rf: any): Asset => ({
+    id: rf.id,
+    name: rf.fileName,
+    type: rf.fileType || "application/octet-stream",
+    size: rf.fileSize || 0,
+    workspaceId: workspace?.id || "default",
+    roomId: rf.roomId,
+    url: rf.fileUrl,
+  });
+
+  // 1. Tải danh sách file từ Database khi mở phòng hoặc F5
+  useEffect(() => {
+    if (demo || !roomId) return;
+
+    const fetchRoomFiles = async () => {
+      try {
+        const authToken = token || localStorage.getItem("token");
+        const res = await axios.get(
+          `http://localhost:8080/api/rooms/${roomId}/files`,
+          { headers: { Authorization: `Bearer ${authToken}` } },
+        );
+        if (Array.isArray(res.data)) {
+          const dbAssets: Asset[] = res.data.map(mapRoomFileToAsset);
+          setAssets((prev) => {
+            const otherAssets = prev.filter((a) => a.roomId !== roomId);
+            return [...otherAssets, ...dbAssets];
+          });
+        }
+      } catch (err) {
+        console.error("Lỗi lấy danh sách file từ Database:", err);
+      }
+    };
+
+    void fetchRoomFiles();
+  }, [roomId, token, demo]);
+
+  // Bộ lọc duy nhất cho danh sách file
   const items = assets
     .filter(
       (a) =>
-        a.workspaceId === workspace?.id &&
         (!roomId || a.roomId === roomId) &&
+        (roomId || !workspace?.id || a.workspaceId === workspace?.id) &&
         (!projectId || a.projectId === projectId) &&
         a.name.toLowerCase().includes(query.toLowerCase()) &&
         (type === "all" ||
@@ -52,6 +94,8 @@ export default function Media({ roomId }: { roomId?: string }) {
     .toSorted((a, b) =>
       sort === "size" ? b.size - a.size : a.name.localeCompare(b.name),
     );
+
+  // 2. Upload file: Gọi API POST /api/rooms/{roomId}/files để lưu vào PostgreSQL
   const uploadFiles = async (files: FileList | File[]) => {
     if (!workspace || upload.status === "uploading") return;
     setUpload({ status: "uploading", message: "Preparing your files…" });
@@ -59,24 +103,38 @@ export default function Media({ roomId }: { roomId?: string }) {
       for (const file of Array.from(files)) {
         if (file.size > 20 * 1024 * 1024)
           throw new Error(`${file.name} exceeds the 20 MB frontend limit.`);
-        const url = demo
-          ? URL.createObjectURL(file)
-          : (await workspaceService.upload(file)).url;
-        const asset: Asset = {
-          id: crypto.randomUUID(),
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size,
-          workspaceId: workspace.id,
-          projectId: roomId
-            ? workspace.projects.find((p) =>
-                p.rooms.some((r) => r.id === roomId),
-              )?.id
-            : projectId || undefined,
-          roomId,
-          url,
-        };
-        setAssets((prev) => [...prev, asset]);
+
+        let asset: Asset;
+        if (demo) {
+          const url = URL.createObjectURL(file);
+          asset = {
+            id: crypto.randomUUID(),
+            name: file.name,
+            type: file.type || "application/octet-stream",
+            size: file.size,
+            workspaceId: workspace.id,
+            roomId,
+            url,
+          };
+        } else {
+          const formData = new FormData();
+          formData.append("file", file);
+          const authToken = token || localStorage.getItem("token");
+
+          const res = await axios.post(
+            `http://localhost:8080/api/rooms/${roomId || workspace.id}/files`,
+            formData,
+            {
+              headers: {
+                Authorization: `Bearer ${authToken}`,
+                "Content-Type": "multipart/form-data",
+              },
+            },
+          );
+          asset = mapRoomFileToAsset(res.data);
+        }
+
+        setAssets((prev) => [...prev.filter((a) => a.id !== asset.id), asset]);
         logActivity(
           demo ? "added a local file" : "uploaded",
           file.name,
@@ -87,14 +145,15 @@ export default function Media({ roomId }: { roomId?: string }) {
       setUpload({
         status: "success",
         message: demo
-          ? "Files added to this demo session. Nothing was uploaded to a server."
-          : "Files uploaded. Library metadata is session-only; the backend has no asset indexing endpoint.",
+          ? "Files added to this demo session."
+          : "Files uploaded and indexed in backend database.",
       });
     } catch (err) {
       setUpload({ status: "failed", message: errorMessage(err) });
     }
     if (input.current) input.current.value = "";
   };
+
   const download = async (asset: Asset) => {
     try {
       const response = await fetch(asset.url);
@@ -112,6 +171,7 @@ export default function Media({ roomId }: { roomId?: string }) {
       );
     }
   };
+
   return (
     <div className={roomId ? "room-resource-page" : "page"}>
       <div className="page-heading">
@@ -135,7 +195,7 @@ export default function Media({ roomId }: { roomId?: string }) {
       <Notice>
         {demo
           ? "Sample references and local uploads. Files you add remain in this browser session only."
-          : "Upload uses the existing WBS file endpoint. Workspace/project associations, renaming and library removal are session-only metadata; the backend does not index or delete stored files."}
+          : "Files are stored on server and indexed in PostgreSQL database."}
       </Notice>
       <div
         className={`upload-dropzone ${dragging ? "dragging" : ""}`}
@@ -325,14 +385,6 @@ export default function Media({ roomId }: { roomId?: string }) {
               </strong>
             </div>
           </div>
-          {preview.attribution && (
-            <p className="muted small-text">
-              Photography: {preview.attribution}. Sample reference asset.
-            </p>
-          )}
-          <p className="muted small-text">
-            Usage tracking is not available on the current backend.
-          </p>
           <div className="modal-actions">
             <Button icon="download" onClick={() => void download(preview)}>
               Download original
@@ -371,9 +423,20 @@ export default function Media({ roomId }: { roomId?: string }) {
       {deleting && (
         <Confirm
           title="Remove from library?"
-          description="This removes the session library reference only. It does not delete files stored on the backend."
+          description="This removes the file from backend database and session library."
           onClose={() => setDeleting(null)}
-          onConfirm={() => {
+          onConfirm={async () => {
+            if (!demo && deleting) {
+              try {
+                const authToken = token || localStorage.getItem("token");
+                await axios.delete(
+                  `http://localhost:8080/api/rooms/${deleting.roomId || roomId}/files/${deleting.id}`,
+                  { headers: { Authorization: `Bearer ${authToken}` } },
+                );
+              } catch (err) {
+                console.error("Lỗi xóa file backend:", err);
+              }
+            }
             setAssets((prev) => prev.filter((a) => a.id !== deleting.id));
             if (deleting.url.startsWith("blob:"))
               URL.revokeObjectURL(deleting.url);
@@ -384,6 +447,7 @@ export default function Media({ roomId }: { roomId?: string }) {
     </div>
   );
 }
+
 function formatSize(bytes: number) {
   return bytes < 1024 * 1024
     ? `${Math.round(bytes / 1024)} KB`

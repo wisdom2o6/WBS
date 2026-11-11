@@ -26,6 +26,7 @@ export default function RoomWorkspace() {
     if (room?.id && workspace?.id)
       recordRecentRoom(workspace.id, room.id, demo);
   }, [room?.id, workspace?.id, demo]);
+  
   const active = pathname.endsWith("/chat")
     ? "chat"
     : pathname.endsWith("/documents")

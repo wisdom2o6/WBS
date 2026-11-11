@@ -239,28 +239,28 @@ public class WorkspaceService {
     }
 
     private ProjectResponse mapToProjectResponse(Project p) {
-        List<RoomResponse> roomResponses = getRoomsByProject(p.getId());
+    List<RoomResponse> roomResponses = getRoomsByProject(p.getId());
 
-        return ProjectResponse.builder()
-                .id(p.getId())
-                .workspaceId(p.getWorkspace().getId())
-                .name(p.getName())
-                .description(p.getDescription())
-                .createdById(p.getCreatedBy().getId())
-                .createdByName(p.getCreatedBy().getFullName())
-                .rooms(roomResponses)
-                .createdAt(p.getCreatedAt())
-                .build();
+    return ProjectResponse.builder()
+            .id(p.getId())
+            .workspaceId(p.getWorkspace() != null ? p.getWorkspace().getId() : null)
+            .name(p.getName())
+            .description(p.getDescription())
+            .createdById(p.getCreatedBy() != null ? p.getCreatedBy().getId() : null)
+            .createdByName(p.getCreatedBy() != null ? p.getCreatedBy().getFullName() : null)
+            .rooms(roomResponses)
+            .createdAt(p.getCreatedAt())
+            .build();
     }
 
     private RoomResponse mapToRoomResponse(Room room) {
         return RoomResponse.builder()
                 .id(room.getId())
-                .projectId(room.getProject().getId())
+                .projectId(room.getProject() != null ? room.getProject().getId() : null)
                 .name(room.getName())
                 .description(room.getDescription())
-                .createdById(room.getCreatedBy().getId())
-                .createdByName(room.getCreatedBy().getFullName())
+                .createdById(room.getCreatedBy() != null ? room.getCreatedBy().getId() : null)
+                .createdByName(room.getCreatedBy() != null ? room.getCreatedBy().getFullName() : null)
                 .createdAt(room.getCreatedAt())
                 .build();
     }

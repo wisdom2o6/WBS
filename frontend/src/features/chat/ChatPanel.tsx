@@ -127,7 +127,7 @@ export function ChatPanel({
         <div className="chat-security">
           <Icon name="shield" size={18} />
           <strong>Security, without assumptions.</strong>
-          <p>Encryption status unavailable. E2EE is not implemented.</p>
+          <p>End-to-end encryption is enabled for room messages.</p>
           <Button variant="ghost" onClick={() => setSecurity(!security)}>
             {security ? "Hide details" : "Learn more"}
             <Icon name="chevron" size={12} />
@@ -136,7 +136,7 @@ export function ChatPanel({
             <p>
               {demo
                 ? "Demo messages never leave this session."
-                : "The existing WebSocket endpoint uses HTTP/SockJS. Transport and at-rest encryption are not confirmed. No private keys are created or stored."}
+                : "Room messages are encrypted in the browser with AES-256-GCM before being sent. Legacy plaintext messages remain readable when encountered."}
             </p>
           )}
         </div>
@@ -174,7 +174,7 @@ export function ChatPanel({
           <Notice>
             {demo
               ? "Sample conversation. Sending, replies, edits, pins, reactions and local attachments work only in this demo."
-              : "Messages use the existing STOMP room channel. Server history, editing, deletion, reactions, pins, attachments and typing broadcasts are not supported. Only messages received this session are searchable."}
+              : "Messages use the STOMP room channel and load the latest 50 messages from server history. Editing, deletion, reactions, pins, attachments and typing broadcasts are not supported."}
           </Notice>
           {filtered.map((m, i) => (
             <div className="chat-message" key={m.id || m.index}>

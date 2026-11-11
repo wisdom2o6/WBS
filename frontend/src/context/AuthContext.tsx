@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useState } from "react";
 
-interface User {
-  userId: string;
+export interface User {
+  id?: string;
   username: string;
   email: string;
-  fullName: string;
+  fullName?: string;
 }
 
 interface AuthContextType {

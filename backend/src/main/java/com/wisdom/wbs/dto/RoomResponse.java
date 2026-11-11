@@ -5,7 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.time.ZonedDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 @Data
@@ -19,5 +19,5 @@ public class RoomResponse {
     private String description;
     private UUID createdById;
     private String createdByName;
-    private ZonedDateTime createdAt;
+    private Instant createdAt;
 }

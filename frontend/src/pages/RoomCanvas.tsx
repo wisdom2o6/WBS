@@ -34,6 +34,7 @@ import { Icon } from "../components/Icon";
 import { ChatPanel } from "../features/chat/ChatPanel";
 import type { ChatMessage } from "../features/chat/ChatPanel";
 import { errorMessage } from "../services/workspace";
+import { decryptMessage, encryptMessage } from "../utils/cryptoUtils";
 
 interface Shape {
   id: string;
@@ -82,6 +83,50 @@ interface UserCursor {
   color: string;
   lastActive?: number;
 }
+
+interface ChatApiMessage {
+  id?: string | number;
+  senderId?: string;
+  senderName?: string;
+  senderUsername?: string;
+  content: string;
+  timestamp?: string;
+}
+
+const decryptChatContent = async (
+  content: string,
+  roomId: string,
+): Promise<string> => {
+  try {
+    return await decryptMessage(content, roomId);
+  } catch {
+    return content;
+  }
+};
+
+const isUUIDStr = (str?: string) =>
+  !!str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+
+const toChatMessage = async (
+  item: ChatApiMessage,
+  roomId: string,
+): Promise<ChatMessage> => {
+  // Lấy tên hợp lệ (không lấy chuỗi dạng UUID)
+  let displayName = [item.senderName, item.senderUsername]
+    .find((name) => name && !isUUIDStr(name));
+
+  return {
+    id: item.id === undefined ? undefined : String(item.id),
+    senderUsername: displayName || "Wisdom",
+    message: await decryptChatContent(item.content, roomId),
+    timestamp:
+      item.timestamp ||
+      new Date().toLocaleTimeString("en", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+  };
+};
 
 // Component phụ render Ảnh trên Konva Canvas
 const URLImage: React.FC<{
@@ -466,9 +511,16 @@ export const RoomCanvas: React.FC<{
         });
 
         // 4. Subscribe Room Chat
-        client.subscribe(`/topic/room.${roomId}.chat`, (message) => {
-          const chatEvt = JSON.parse(message.body);
-          setMessages((prev) => [...prev, chatEvt]);
+        client.subscribe(`/topic/room/${roomId}/chat`, (message) => {
+          void (async () => {
+            try {
+              const chatEvt = JSON.parse(message.body) as ChatApiMessage;
+              const chatMessage = await toChatMessage(chatEvt, roomId);
+              setMessages((prev) => [...prev, chatMessage]);
+            } catch (error) {
+              setCanvasError(errorMessage(error));
+            }
+          })();
         });
       },
       onWebSocketClose: () => {
@@ -490,6 +542,39 @@ export const RoomCanvas: React.FC<{
       client.deactivate();
     };
   }, [roomId, token, user?.username, demo]);
+
+  // Tải lịch sử chat đã mã hóa từ Database
+  useEffect(() => {
+    if (demo || !roomId || !token) return;
+
+    let active = true;
+    const fetchChatHistory = async () => {
+      try {
+        const res = await axios.get(
+          `http://localhost:8080/api/rooms/${roomId}/messages?limit=50`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        const items = Array.isArray(res.data)
+          ? res.data
+          : Array.isArray(res.data?.messages)
+            ? res.data.messages
+            : [];
+        const history = await Promise.all(
+          (items as ChatApiMessage[]).map((item) =>
+            toChatMessage(item, roomId),
+          ),
+        );
+        if (active) setMessages(history);
+      } catch (error) {
+        if (active) setCanvasError(errorMessage(error));
+      }
+    };
+
+    void fetchChatHistory();
+    return () => {
+      active = false;
+    };
+  }, [roomId, token, demo]);
 
   useEffect(() => {
     if (
@@ -636,13 +721,41 @@ export const RoomCanvas: React.FC<{
     }
   };
 
-  const handleSendMessage = (message: string) => {
-    if (!message.trim() || !stompClientRef.current?.connected || !roomId)
-      return;
-    stompClientRef.current.publish({
-      destination: `/app/room.${roomId}.chat`,
-      body: JSON.stringify({ message }),
-    });
+const handleSendMessage = async (text: string) => {
+    const trimmedText = text.trim();
+    if (!trimmedText || !roomId) return;
+
+    // 1. Mã hóa E2EE tin nhắn văn bản
+    const encryptedContent = await encryptMessage(trimmedText, roomId);
+
+    // 2. Tạo Payload với thông tin user từ useAuth()
+    const payload = {
+      roomId,
+      senderId: (user as any)?.id || user?.username || "",
+      senderName: user?.fullName || user?.username || "Wisdom",
+      content: encryptedContent,
+      timestamp: new Date().toISOString(),
+    };
+
+    // 3. Gửi tin nhắn qua STOMP WebSocket
+    const client = stompClientRef.current;
+    if (client && client.connected) {
+      client.publish({
+        destination: `/app/room/${roomId}/chat.send`,
+        body: JSON.stringify(payload),
+      });
+    } else if (demo) {
+      const demoMsg: ChatMessage = {
+        id: Date.now().toString(),
+        senderUsername: user?.username || "You",
+        message: trimmedText,
+        timestamp: new Date().toLocaleTimeString("en", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      };
+      setMessages((prev) => [...prev, demoMsg]);
+    }
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
