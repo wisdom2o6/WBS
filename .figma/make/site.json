@@ -1,0 +1,10 @@
+{
+  "description": "I can’t determine the app’s purpose from this request; it describes project bootstrapping and deployment setup, not the web application’s functionality.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
