@@ -3,6 +3,7 @@ package com.wisdom.wbs.service;
 import com.wisdom.wbs.dto.*;
 import com.wisdom.wbs.entity.*;
 import com.wisdom.wbs.repository.*;
+import java.io.File;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -14,6 +15,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class WorkspaceService {
 
+    private final RoomFileRepository roomFileRepository;
     private final WorkspaceRepository workspaceRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final UserRepository userRepository;
@@ -180,6 +182,20 @@ public class WorkspaceService {
 
     @Transactional
     public void deleteRoom(UUID id) {
+        // 1. Delete physical files and database records for this room
+        List<RoomFile> files = roomFileRepository.findByRoomIdOrderByCreatedAtDesc(id);
+        for (RoomFile file : files) {
+            if (file.getFileUrl() != null) {
+                String storedName = file.getFileUrl().substring(file.getFileUrl().lastIndexOf('/') + 1);
+                File physicalFile = new File(System.getProperty("user.dir") + File.separator + "uploads", storedName);
+                if (physicalFile.exists()) {
+                    physicalFile.delete();
+                }
+            }
+        }
+        roomFileRepository.deleteAll(files);
+
+        // 2. Delete canvas objects and room
         canvasObjectRepository.deleteByRoomId(id);
         roomRepository.deleteById(id);
     }

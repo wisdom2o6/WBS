@@ -1,6 +1,6 @@
 package com.wisdom.wbs.service.impl;
 
-import com.wisdom.wbs.dto.ChatMessageDTO;
+import com.wisdom.wbs.dto.*;
 import com.wisdom.wbs.entity.Room;
 import com.wisdom.wbs.entity.RoomMessage;
 import com.wisdom.wbs.repository.RoomMessageRepository;

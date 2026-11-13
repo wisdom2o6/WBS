@@ -82,7 +82,6 @@ export default function RoomWorkspace() {
           >
             <Icon name={t.icon} size={15} />
             {t.label}
-            {t.key === "chat" && <PlannedBadge label="Beta" />}
           </Link>
         ))}
         <span>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { API_BASE_URL as API_ORIGIN } from "../config/env";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
@@ -12,7 +13,6 @@ import {
   IconButton,
   Input,
   Modal,
-  Notice,
   Select,
   useToast,
 } from "../components/ui";
@@ -24,8 +24,6 @@ import {
 } from "../components/patterns";
 import { errorMessage, workspaceService } from "../services/workspace";
 import type { Asset } from "../types/workspace";
-
-const API_ORIGIN = "http://localhost:8080";
 
 type Category = "image" | "document" | "video" | "other";
 function category(a: { type: string; name: string }): Category {
@@ -107,36 +105,49 @@ export default function Media({ roomId }: { roomId?: string }) {
   const [projectId, setProjectId] = useState(params.get("project") || "");
   const input = useRef<HTMLInputElement>(null);
   const toast = useToast();
+
   useEffect(() => {
-    if (demo || !roomId || !workspace?.id) return;
+    if (demo || !workspace?.id || !token) return;
     let active = true;
+    const url = roomId
+      ? `${API_ORIGIN}/api/rooms/${roomId}/files`
+      : `${API_ORIGIN}/api/workspaces/${workspace.id}/files`;
+
     axios
-      .get<RoomFileRecord[]>(`${API_ORIGIN}/api/rooms/${roomId}/files`, {
+      .get<RoomFileRecord[]>(url, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then(({ data }) => {
         if (!active || !Array.isArray(data)) return;
-        const roomAssets: Asset[] = data.map((file) => ({
-          id: file.id,
-          name: file.fileName,
-          type: file.fileType || "application/octet-stream",
-          size: file.fileSize || 0,
-          workspaceId: workspace.id,
-          roomId: file.roomId,
-          url: file.fileUrl,
-        }));
-        setAssets((prev) => [
-          ...prev.filter((asset) => asset.roomId !== roomId),
-          ...roomAssets,
-        ]);
+        const mapped: Asset[] = data.map((file) => {
+          const matchedProject = workspace.projects.find((p) =>
+            p.rooms.some((r) => r.id === file.roomId),
+          );
+          return {
+            id: file.id,
+            name: file.fileName,
+            type: file.fileType || "application/octet-stream",
+            size: file.fileSize || 0,
+            workspaceId: workspace.id,
+            projectId: matchedProject?.id,
+            roomId: file.roomId,
+            url: file.fileUrl,
+          };
+        });
+        setAssets((prev) =>
+          roomId
+            ? [...prev.filter((a) => a.roomId !== roomId), ...mapped]
+            : mapped,
+        );
       })
       .catch((error) =>
-        toast(`Room files could not be loaded: ${errorMessage(error)}`, true),
+        toast(`Files could not be loaded: ${errorMessage(error)}`, true),
       );
     return () => {
       active = false;
     };
-  }, [demo, roomId, setAssets, token, toast, workspace?.id]);
+  }, [demo, roomId, setAssets, token, toast, workspace]);
+
   const scoped = assets.filter(
     (a) => a.workspaceId === workspace?.id && (!roomId || a.roomId === roomId),
   );
@@ -153,6 +164,7 @@ export default function Media({ roomId }: { roomId?: string }) {
   const busy = uploads.some((u) => u.status === "uploading");
   const patchUpload = (id: string, patch: Partial<UploadItem>) =>
     setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, ...patch } : u)));
+
   const uploadFiles = async (files: FileList | File[]) => {
     if (!workspace || !can.create) return;
     const list = Array.from(files);
@@ -163,26 +175,35 @@ export default function Media({ roomId }: { roomId?: string }) {
       progress: 0,
       status: "uploading" as const,
     }));
-    setUploads((prev) => [...queue, ...prev.filter((u) => u.status === "uploading")]);
+    setUploads((prev) => [
+      ...queue,
+      ...prev.filter((u) => u.status === "uploading"),
+    ]);
+
     for (const [i, file] of list.entries()) {
       const item = queue[i];
       try {
         if (file.size > 20 * 1024 * 1024)
           throw new Error("Exceeds the 20 MB limit.");
         let url: string;
+        let savedId: string = crypto.randomUUID();
+        const targetRoomId =
+          roomId ||
+          workspace.projects.find((p) => p.id === projectId)?.rooms[0]?.id ||
+          workspace.projects[0]?.rooms[0]?.id;
+
         if (demo) {
           patchUpload(item.id, { progress: 0.6 });
           url = URL.createObjectURL(file);
-        } else if (roomId) {
+        } else if (targetRoomId) {
           const form = new FormData();
           form.append("file", file);
           const response = await axios.post<RoomFileRecord>(
-            `${API_ORIGIN}/api/rooms/${roomId}/files`,
+            `${API_ORIGIN}/api/rooms/${targetRoomId}/files`,
             form,
             {
               headers: {
                 Authorization: `Bearer ${token}`,
-                "Content-Type": "multipart/form-data",
               },
               onUploadProgress: (event) =>
                 patchUpload(item.id, {
@@ -190,26 +211,28 @@ export default function Media({ roomId }: { roomId?: string }) {
                 }),
             },
           );
-          const record = response.data;
-          url = record.fileUrl;
-        } else
+          savedId = response.data.id;
+          url = response.data.fileUrl;
+        } else {
           url = (
             await workspaceService.upload(file, (p) =>
               patchUpload(item.id, { progress: p }),
             )
           ).url;
+        }
+
         const asset: Asset = {
-          id: crypto.randomUUID(),
+          id: savedId,
           name: file.name,
           type: file.type || "application/octet-stream",
           size: file.size,
           workspaceId: workspace.id,
-          projectId: roomId
+          projectId: targetRoomId
             ? workspace.projects.find((p) =>
-                p.rooms.some((r) => r.id === roomId),
+                p.rooms.some((r) => r.id === targetRoomId),
               )?.id
             : projectId || undefined,
-          roomId,
+          roomId: targetRoomId,
           url,
         };
         setAssets((prev) => [...prev, asset]);
@@ -226,6 +249,7 @@ export default function Media({ roomId }: { roomId?: string }) {
     }
     if (input.current) input.current.value = "";
   };
+
   const download = async (asset: Asset) => {
     try {
       const response = await fetch(asset.url);
@@ -243,10 +267,13 @@ export default function Media({ roomId }: { roomId?: string }) {
       );
     }
   };
+
   const totals = (["image", "document", "video", "other"] as Category[]).map(
     (c) => ({
       c,
-      size: scoped.filter((a) => category(a) === c).reduce((n, a) => n + a.size, 0),
+      size: scoped
+        .filter((a) => category(a) === c)
+        .reduce((n, a) => n + a.size, 0),
       count: scoped.filter((a) => category(a) === c).length,
     }),
   );
@@ -264,6 +291,7 @@ export default function Media({ roomId }: { roomId?: string }) {
     );
     setInserting({ asset, target });
   };
+
   return (
     <div className={roomId ? "room-resource-page" : "page"}>
       <div className="page-heading">
@@ -287,16 +315,15 @@ export default function Media({ roomId }: { roomId?: string }) {
           </Button>
         )}
       </div>
-      <div className="media-module-status">
-        <PlannedBadge label="Beta" />
-        <span>
-          {demo
-            ? "Sample references and local uploads. Files you add remain in this browser session only."
-            : roomId
-              ? "Room files are uploaded, indexed and restored from PostgreSQL. Library labels remain session metadata."
-              : "Workspace uploads use the file endpoint. Workspace/project associations and labels remain session metadata."}
-        </span>
-      </div>
+      {demo && (
+        <div className="media-module-status">
+          <PlannedBadge label="Demo" />
+          <span>
+            Sample references and local uploads. Files you add remain in this
+            browser session only.
+          </span>
+        </div>
+      )}
       <div className="media-overview">
         {can.create ? (
           <div
@@ -375,7 +402,7 @@ export default function Media({ roomId }: { roomId?: string }) {
           <small>
             {demo
               ? "Sample totals for this session."
-              : "Quota is not reported by the backend yet."}
+              : "Synced with PostgreSQL storage."}
           </small>
         </aside>
       </div>
@@ -512,7 +539,10 @@ export default function Media({ roomId }: { roomId?: string }) {
               {asset.type.startsWith("image/") ? (
                 <img src={asset.url} alt={asset.name} loading="lazy" />
               ) : (
-                <Icon name={category(asset) === "video" ? "video" : "file"} size={42} />
+                <Icon
+                  name={category(asset) === "video" ? "video" : "file"}
+                  size={42}
+                />
               )}
               <FileType asset={asset} />
             </Button>
@@ -615,14 +645,12 @@ export default function Media({ roomId }: { roomId?: string }) {
               </Button>
               <Button
                 icon="file"
-                disabled={!can.edit || category(preview) !== "image" || !docs.length}
+                disabled={
+                  !can.edit || category(preview) !== "image" || !docs.length
+                }
                 onClick={() => openInsert(preview, "document")}
               >
                 Insert into document
-              </Button>
-              <Button icon="chat" disabled title="Chat attachments are planned">
-                Send to chat
-                <PlannedBadge />
               </Button>
             </div>
             {category(preview) !== "image" && (
@@ -633,7 +661,7 @@ export default function Media({ roomId }: { roomId?: string }) {
           </div>
           <div className="modal-actions">
             <span className="muted small-text">
-              Usage tracking is not available on the current backend.
+              Stored in workspace file repository.
             </span>
             <Button icon="download" onClick={() => void download(preview)}>
               Download original
@@ -669,7 +697,11 @@ export default function Media({ roomId }: { roomId?: string }) {
                           updatedAt: new Date().toISOString(),
                           blocks: [
                             ...d.blocks,
-                            { id: crypto.randomUUID(), kind: "image", text: asset.url },
+                            {
+                              id: crypto.randomUUID(),
+                              kind: "image",
+                              text: asset.url,
+                            },
                           ],
                         }
                       : d,
@@ -727,22 +759,30 @@ export default function Media({ roomId }: { roomId?: string }) {
         <Modal title="Rename file" onClose={() => setRenaming(null)}>
           <form
             className="form-stack"
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
               if (!name.trim()) return;
-              setAssets((prev) =>
-                prev.map((a) =>
-                  a.id === renaming.id ? { ...a, name: name.trim() } : a,
-                ),
-              );
-              setRenaming(null);
-              toast("File label updated in this session.");
+              try {
+                if (!demo && renaming.roomId && token) {
+                  await axios.patch(
+                    `${API_ORIGIN}/api/rooms/${renaming.roomId}/files/${renaming.id}`,
+                    { fileName: name.trim() },
+                    { headers: { Authorization: `Bearer ${token}` } },
+                  );
+                }
+                setAssets((prev) =>
+                  prev.map((a) =>
+                    a.id === renaming.id ? { ...a, name: name.trim() } : a,
+                  ),
+                );
+                setRenaming(null);
+                toast("File renamed.");
+              } catch (err) {
+                toast(errorMessage(err), true);
+              }
             }}
           >
-            <Field
-              label="File name"
-              hint={demo ? undefined : "Renaming changes the library label only."}
-            >
+            <Field label="File name">
               <Input
                 required
                 value={name}
@@ -752,7 +792,7 @@ export default function Media({ roomId }: { roomId?: string }) {
             <div className="modal-actions">
               <Button onClick={() => setRenaming(null)}>Cancel</Button>
               <Button variant="primary" type="submit">
-                Save label
+                Save name
               </Button>
             </div>
           </form>
@@ -781,12 +821,6 @@ export default function Media({ roomId }: { roomId?: string }) {
             toast(`${deleting.name} removed from the library.`);
           }}
         />
-      )}
-      {!demo && !roomId && (
-        <Notice>
-          Files are served from the configured WBS file endpoint. Library
-          metadata resets when you reload.
-        </Notice>
       )}
     </div>
   );

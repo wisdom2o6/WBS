@@ -43,4 +43,7 @@ public class User {
     @UpdateTimestamp
     @Column(name = "updated_at")
     private ZonedDateTime updatedAt;
+
+    @Column(name = "public_key_jwk", columnDefinition = "TEXT")
+    private String publicKeyJwk;
 }

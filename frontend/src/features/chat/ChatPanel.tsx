@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import axios from "axios";
 import { useWorkspace } from "../../context/WorkspaceContext";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -15,22 +17,26 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../components/Icon";
 import {
-  PlannedBadge,
   SecurityStatus,
   StatusIndicator,
   connectionSecurity,
 } from "../../components/patterns";
+import { errorMessage } from "../../services/workspace";
 
 export interface ChatMessage {
   id?: string;
+  clientMessageId?: string;
   senderUsername: string;
   message: string;
   timestamp: string;
+  replyToId?: string;
   replyTo?: string;
   pinned?: boolean;
   edited?: boolean;
+  deleted?: boolean;
   reactions?: { icon: string; users: string[] }[];
-  attachment?: { name: string; url: string; type: string };
+  attachment?: { id?: string; name: string; url: string; type: string };
+  attachmentUrl?: string;
   /** Local delivery state; absent once the server echo arrives. */
   status?: "sending" | "failed";
   /** System notices such as "Sarah created this room". */
@@ -38,20 +44,51 @@ export interface ChatMessage {
   /** Render the "New messages" divider before this message. */
   unreadBoundary?: boolean;
 }
+
 const REACTIONS = [
   { icon: "heart", label: "Love" },
   { icon: "check", label: "Agree" },
   { icon: "star", label: "Important" },
 ];
-const API_ENDPOINT = "http://localhost:8080";
+
+export const API_ENDPOINT =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
+  "http://localhost:8080";
+
 const now = () =>
   new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
-/** Live replies are encoded as "↳ user: quote\n body" in the existing payload. */
+
 function parseReply(m: ChatMessage) {
   if (m.replyTo || !m.message.startsWith("↳ ") || !m.message.includes("\n"))
     return { reply: m.replyTo, body: m.message };
   const [first, ...rest] = m.message.split("\n");
   return { reply: first.slice(2), body: rest.join("\n") };
+}
+
+export interface ChatPanelProps {
+  messages: ChatMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  connected: boolean;
+  connection: "connecting" | "connected" | "reconnecting" | "failed";
+  onSend: (
+    message: string,
+    options?: {
+      clientMessageId?: string;
+      replyToId?: string;
+      attachmentFileId?: string;
+    },
+  ) => boolean | Promise<boolean>;
+  onEdit?: (messageId: string, newPlainText: string) => void | Promise<void>;
+  onDelete?: (messageId: string) => void | Promise<void>;
+  onPin?: (messageId: string, pinned: boolean) => void | Promise<void>;
+  onReact?: (messageId: string, icon: string) => void | Promise<void>;
+  onLoadMore?: () => void | Promise<void>;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  typingUsers?: string[];
+  onTyping?: (isTyping: boolean) => void;
+  readOnly?: boolean;
+  role?: string;
 }
 
 export function ChatPanel({
@@ -60,17 +97,24 @@ export function ChatPanel({
   connected,
   connection,
   onSend,
-}: {
-  messages: ChatMessage[];
-  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  connected: boolean;
-  connection: "connecting" | "connected" | "reconnecting" | "failed";
-  onSend: (message: string) => boolean | Promise<boolean>;
-}) {
+  onEdit,
+  onDelete,
+  onPin,
+  onReact,
+  onLoadMore,
+  hasMore = false,
+  loadingMore = false,
+  typingUsers = [],
+  onTyping,
+  readOnly,
+}: ChatPanelProps) {
+  const { roomId } = useParams<{ roomId: string }>();
   const { demo, members, can } = useWorkspace();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const username = demo ? "alex" : user?.username;
-  const canPost = can.edit;
+  const displayName = demo ? "Alex" : user?.fullName || user?.username;
+  const canPost = readOnly !== undefined ? !readOnly : can.edit;
+
   const [query, setQuery] = useState("");
   const [text, setText] = useState("");
   const [reply, setReply] = useState<ChatMessage | null>(null);
@@ -81,67 +125,152 @@ export function ChatPanel({
   const [showPins, setShowPins] = useState(false);
   const [mention, setMention] = useState(false);
   const [attachment, setAttachment] = useState<ChatMessage["attachment"]>();
+  const [uploadingFile, setUploadingFile] = useState(false);
+
   const file = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTypingRef = useRef(false);
   const toast = useToast();
+
   const live = demo || connected;
   const security = connectionSecurity(API_ENDPOINT);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [messages.length]);
+
+  useEffect(() => {
+    return () => {
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    };
+  }, []);
+
+  const notifyTyping = (active: boolean) => {
+    if (demo || !onTyping) return;
+    if (active) {
+      if (!isTypingRef.current) {
+        isTypingRef.current = true;
+        onTyping(true);
+      }
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => {
+        isTypingRef.current = false;
+        onTyping(false);
+      }, 2500);
+    } else {
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        onTyping(false);
+      }
+    }
+  };
+
   const nameFor = (u: string) =>
-    members.find((p) => p.username === u)?.fullName || u || "Member";
+    members.find((p) => p.username === u || p.fullName === u)?.fullName ||
+    u ||
+    "Member";
+
   const update = (index: number, patch: Partial<ChatMessage>) =>
     setMessages((prev) =>
       prev.map((m, i) => (i === index ? { ...m, ...patch } : m)),
     );
-  const deliver = async (index: number, body: string) => {
+
+  const deliver = async (
+    clientMessageId: string,
+    body: string,
+    options?: { replyToId?: string; attachmentFileId?: string },
+  ) => {
     if (demo) {
-      setTimeout(() => update(index, { status: undefined }), 450);
+      setTimeout(() => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.clientMessageId === clientMessageId
+              ? { ...m, status: undefined }
+              : m,
+          ),
+        );
+      }, 450);
       return;
     }
-    if (!(await onSend(body))) update(index, { status: "failed" });
+    const ok = await onSend(body, {
+      clientMessageId,
+      replyToId: options?.replyToId,
+      attachmentFileId: options?.attachmentFileId,
+    });
+    if (!ok) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.clientMessageId === clientMessageId
+            ? { ...m, status: "failed" }
+            : m,
+        ),
+      );
+    }
   };
+
   const send = () => {
-    if ((!text.trim() && !attachment) || !canPost) return;
+    if ((!text.trim() && !attachment) || !canPost || uploadingFile) return;
+
+    // 1. Chế độ chỉnh sửa tin nhắn
     if (editing !== null) {
-      update(editing, { message: text, edited: true });
+      const target = messages[editing];
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      update(editing, { message: trimmed, edited: true });
+      if (!demo && target?.id && onEdit) {
+        void onEdit(target.id, trimmed);
+      }
       setEditing(null);
       setText("");
+      notifyTyping(false);
       return;
     }
+
     if (!demo && !connected) {
       toast("Chat is disconnected. Your draft has not been sent.", true);
       return;
     }
-    const body = demo
-      ? text
-      : reply
-        ? `↳ ${reply.senderUsername}: ${parseReply(reply).body}\n${text}`
-        : text;
-    const index = messages.length;
+
+    const body = text.trim() || (attachment ? `Shared ${attachment.name}` : "");
+    const clientMessageId = crypto.randomUUID();
+    const replyPreview = reply
+      ? `${nameFor(reply.senderUsername)}: ${parseReply(reply).body}`
+      : undefined;
+    const replyToId = reply?.id;
+    const attachmentFileId = attachment?.id;
+
     setMessages((prev) => [
       ...prev,
       {
-        id: crypto.randomUUID(),
-        senderUsername: username || "you",
+        id: clientMessageId,
+        clientMessageId,
+        senderUsername: displayName || username || "you",
         message: body,
         timestamp: now(),
-        replyTo: demo && reply ? parseReply(reply).body : undefined,
+        replyToId,
+        replyTo: replyPreview,
         attachment,
         status: "sending",
       },
     ]);
-    void deliver(index, body);
+
+    void deliver(clientMessageId, body, { replyToId, attachmentFileId });
     setText("");
     setReply(null);
     setAttachment(undefined);
+    notifyTyping(false);
   };
-  const toggleReaction = (index: number, icon: string) =>
+
+  const toggleReaction = (index: number, icon: string) => {
+    const target = messages[index];
+    if (!target || target.deleted) return;
+
+    const me = displayName || username || "alex";
     setMessages((prev) =>
       prev.map((msg, i) => {
         if (i !== index) return msg;
-        const me = username || "alex";
         const list = msg.reactions ? [...msg.reactions] : [];
         const r = list.find((x) => x.icon === icon);
         if (!r) list.push({ icon, users: [me] });
@@ -156,14 +285,84 @@ export function ChatPanel({
         };
       }),
     );
+
+    if (!demo && target.id && onReact) {
+      void onReact(target.id, icon);
+    }
+  };
+
+  const handlePinToggle = (index: number) => {
+    const target = messages[index];
+    if (!target || target.deleted) return;
+    const nextPinned = !target.pinned;
+    update(index, { pinned: nextPinned });
+    if (!demo && target.id && onPin) {
+      void onPin(target.id, nextPinned);
+    }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const chosen = e.target.files?.[0];
+    e.target.value = "";
+    if (!chosen) return;
+    if (chosen.size > 20 * 1024 * 1024) {
+      toast("Attachments must be smaller than 20 MB.", true);
+      return;
+    }
+
+    if (demo) {
+      setAttachment({
+        name: chosen.name,
+        type: chosen.type || "application/octet-stream",
+        url: URL.createObjectURL(chosen),
+      });
+      return;
+    }
+
+    if (!token || !roomId) return;
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", chosen);
+      const res = await axios.post(
+        `${API_ENDPOINT}/api/rooms/${roomId}/files`,
+        formData,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+      setAttachment({
+        id: res.data?.id ? String(res.data.id) : undefined,
+        name: res.data?.fileName || res.data?.name || chosen.name,
+        type:
+          res.data?.fileType ||
+          res.data?.type ||
+          chosen.type ||
+          "application/octet-stream",
+        url: res.data?.fileUrl || res.data?.url,
+      });
+    } catch (err) {
+      toast(errorMessage(err), true);
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
   const filtered = messages
     .map((m, index) => ({ ...m, index }))
     .filter(
       (m) =>
-        (!query || (!m.system && m.message.toLowerCase().includes(query.toLowerCase()))) &&
+        (!query ||
+          (!m.system &&
+            m.message.toLowerCase().includes(query.toLowerCase()))) &&
         (!showPins || m.pinned),
     );
+
   const onlineSample = demo ? ["sarah", "mia"] : [];
+  const pinnedCount = messages.filter((m) => m.pinned && !m.deleted).length;
+
   return (
     <div className="chat-workspace">
       <aside className="chat-sidebar">
@@ -186,6 +385,7 @@ export function ChatPanel({
           onClick={() => setShowPins(true)}
         >
           Pinned messages
+          {pinnedCount > 0 && <span className="tab-count">{pinnedCount}</span>}
         </Button>
         <div className="chat-sidebar-members">
           <span className="eyebrow">
@@ -209,16 +409,11 @@ export function ChatPanel({
         </div>
         <div className="chat-module-status">
           <div>
-            <strong>Chat</strong>
-            <PlannedBadge label="Beta" />
+            <strong>End-to-End Encrypted</strong>
           </div>
           <p>
             <Icon name="check" size={12} />
-            Encrypted live send, receive and 50-message history
-          </p>
-          <p className="planned">
-            <Icon name="clock" size={12} />
-            Edits, reactions, pins, files and typing status are planned
+            Live chat, replies, reactions, pins &amp; history active
           </p>
         </div>
       </aside>
@@ -230,7 +425,11 @@ export function ChatPanel({
             </strong>
             <span>
               {demo ? (
-                <StatusIndicator state="local" label="Sample conversation" compact />
+                <StatusIndicator
+                  state="local"
+                  label="Sample conversation"
+                  compact
+                />
               ) : (
                 <StatusIndicator
                   compact
@@ -278,6 +477,17 @@ export function ChatPanel({
           </div>
         )}
         <div className="chat-timeline">
+          {!demo && hasMore && onLoadMore && !showPins && !query && (
+            <div style={{ textAlign: "center", padding: "8px 0" }}>
+              <Button
+                variant="ghost"
+                disabled={loadingMore}
+                onClick={() => void onLoadMore()}
+              >
+                {loadingMore ? "Loading older messages…" : "Load older messages"}
+              </Button>
+            </div>
+          )}
           <div className="chat-date-separator">
             <span>
               {demo ? "SAMPLE CONVERSATION · TODAY" : "CURRENT SESSION"}
@@ -286,8 +496,8 @@ export function ChatPanel({
           {!demo && (
             <div className="chat-module-note">
               <Icon name="info" size={14} />
-              Room messages are encrypted in the browser with AES-256-GCM and
-              the latest 50 messages load from server history.
+              Room messages are encrypted in the browser with AES-256-GCM before
+              leaving your device.
             </div>
           )}
           {filtered.map((m, i) => {
@@ -307,9 +517,11 @@ export function ChatPanel({
               !m.unreadBoundary &&
               !query &&
               !showPins;
-            const own = m.senderUsername === username;
+            const own =
+              m.senderUsername === username ||
+              m.senderUsername === displayName;
             const { reply: replyText, body } = parseReply(m);
-            const isImage = m.attachment?.type.startsWith("image/");
+            const isImage = m.attachment?.type?.startsWith("image/");
             return (
               <div key={m.id || m.index}>
                 {m.unreadBoundary && !query && !showPins && (
@@ -338,20 +550,23 @@ export function ChatPanel({
                         <strong>{nameFor(m.senderUsername)}</strong>
                         {own && <span>you</span>}
                         <time>{m.timestamp}</time>
-                        {m.pinned && <Icon name="pin" size={12} />}
+                        {m.pinned && !m.deleted && <Icon name="pin" size={12} />}
                       </div>
                     )}
-                    {replyText && (
+                    {replyText && !m.deleted && (
                       <div className="message-reply-preview">
                         <Icon name="reply" size={13} />
                         {replyText}
                       </div>
                     )}
-                    <p>
+                    <p style={m.deleted ? { opacity: 0.6, fontStyle: "italic" } : undefined}>
                       {body}
-                      {m.edited && <em className="message-edited">(edited)</em>}
+                      {m.edited && !m.deleted && (
+                        <em className="message-edited">(edited)</em>
+                      )}
                     </p>
-                    {m.attachment &&
+                    {!m.deleted &&
+                      m.attachment &&
                       (isImage ? (
                         <a
                           className="message-image"
@@ -376,23 +591,60 @@ export function ChatPanel({
                           <Icon name="download" size={14} />
                         </DownloadLink>
                       ))}
-                    {m.reactions?.length ? (
+                    {!m.deleted && m.reactions?.length ? (
                       <div className="message-reactions">
-                        {m.reactions.map((r) => (
-                          <button
-                            type="button"
-                            key={r.icon}
-                            className={`reaction ${r.users.includes(username || "alex") ? "mine" : ""}`}
-                            aria-label={`${REACTIONS.find((x) => x.icon === r.icon)?.label || "Reaction"}, ${r.users.length}`}
-                            disabled={!demo}
-                            onClick={() => toggleReaction(m.index, r.icon)}
-                          >
-                            <Icon name={r.icon} size={12} />
-                            {r.users.length}
-                          </button>
-                        ))}
+                        {m.reactions.map((r) => {
+                          const me = displayName || username || "alex";
+                          return (
+                            <button
+                              type="button"
+                              key={r.icon}
+                              className={`reaction ${r.users.includes(me) || (username && r.users.includes(username)) ? "mine" : ""}`}
+                              aria-label={`${REACTIONS.find((x) => x.icon === r.icon)?.label || "Reaction"}, ${r.users.length}`}
+                              disabled={!canPost}
+                              onClick={() => toggleReaction(m.index, r.icon)}
+                            >
+                              <Icon name={r.icon} size={12} />
+                              {r.users.length}
+                            </button>
+                          );
+                        })}
                       </div>
                     ) : null}
+                    {!m.deleted &&
+                      m.attachment &&
+                      (isImage ? (
+                        <a
+                          className="message-image"
+                          href={m.attachment.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <img src={m.attachment.url} alt={m.attachment.name} />
+                          <span>
+                            <Icon name="image" size={12} />
+                            {m.attachment.name}
+                          </span>
+                        </a>
+                      ) : (
+                        <DownloadLink
+                          className="message-attachment"
+                          href={m.attachment.url}
+                          download={m.attachment.name}
+                        >
+                          <Icon name="paperclip" size={15} />
+                          {m.attachment.name}
+                          <Icon name="download" size={14} />
+                        </DownloadLink>
+                      ))}
+                    {!m.deleted && !m.attachment && m.attachmentUrl && (
+                      <span
+                        className="message-edited"
+                        style={{ display: "block", marginTop: 4 }}
+                      >
+                        [Tệp đính kèm đã bị xóa khỏi phòng]
+                      </span>
+                    )}
                     {m.status === "sending" && (
                       <span className="message-status">
                         <Spinner size={9} />
@@ -406,8 +658,16 @@ export function ChatPanel({
                         <button
                           type="button"
                           onClick={() => {
-                            update(m.index, { status: "sending" });
-                            void deliver(m.index, m.message);
+                            const cid =
+                              m.clientMessageId || crypto.randomUUID();
+                            update(m.index, {
+                              status: "sending",
+                              clientMessageId: cid,
+                            });
+                            void deliver(cid, m.message, {
+                              replyToId: m.replyToId,
+                              attachmentFileId: m.attachment?.id,
+                            });
                           }}
                         >
                           Retry
@@ -425,7 +685,7 @@ export function ChatPanel({
                       </span>
                     )}
                   </div>
-                  {!m.status && (
+                  {!m.status && !m.deleted && (
                     <div className="message-actions">
                       {canPost && (
                         <IconButton
@@ -437,12 +697,8 @@ export function ChatPanel({
                       <div className="reaction-picker-wrap">
                         <IconButton
                           icon="heart"
-                          label={
-                            demo
-                              ? "React to message"
-                              : "Reactions require backend support"
-                          }
-                          disabled={!demo || !canPost}
+                          label="React to message"
+                          disabled={!canPost}
                           onClick={() =>
                             setReacting(reacting === m.index ? null : m.index)
                           }
@@ -465,16 +721,15 @@ export function ChatPanel({
                       </div>
                       <IconButton
                         icon="pin"
-                        label="Pin message (demo only)"
-                        disabled={!demo || !canPost}
-                        onClick={() => update(m.index, { pinned: !m.pinned })}
+                        label={m.pinned ? "Unpin message" : "Pin message"}
+                        disabled={!canPost}
+                        onClick={() => handlePinToggle(m.index)}
                       />
-                      {own && (
+                      {own && canPost && (
                         <>
                           <IconButton
                             icon="edit"
-                            label="Edit message (demo only)"
-                            disabled={!demo}
+                            label="Edit message"
                             onClick={() => {
                               setEditing(m.index);
                               setText(m.message);
@@ -482,8 +737,7 @@ export function ChatPanel({
                           />
                           <IconButton
                             icon="trash"
-                            label="Delete message (demo only)"
-                            disabled={!demo}
+                            label="Delete message"
                             onClick={() => setDeleting(m.index)}
                           />
                         </>
@@ -540,7 +794,7 @@ export function ChatPanel({
               {editing !== null && (
                 <div className="composer-context">
                   <Icon name="edit" size={14} />
-                  <span>Editing message · local demo</span>
+                  <span>Editing message</span>
                   <Button
                     variant="ghost"
                     onClick={() => {
@@ -563,13 +817,15 @@ export function ChatPanel({
                   )}
                   <span>
                     <strong>{attachment.name}</strong>
-                    <small>Local attachment · not uploaded</small>
+                    <small>
+                      {demo ? "Local attachment" : "Uploaded attachment"}
+                    </small>
                   </span>
                   <IconButton
                     icon="close"
                     label="Remove attachment"
                     onClick={() => {
-                      URL.revokeObjectURL(attachment.url);
+                      if (demo) URL.revokeObjectURL(attachment.url);
                       setAttachment(undefined);
                     }}
                   />
@@ -588,8 +844,10 @@ export function ChatPanel({
                   rows={2}
                   value={text}
                   onChange={(e) => {
-                    setText(e.target.value);
-                    setMention(e.target.value.endsWith("@"));
+                    const val = e.target.value;
+                    setText(val);
+                    setMention(val.endsWith("@"));
+                    notifyTyping(val.trim().length > 0);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
@@ -605,10 +863,8 @@ export function ChatPanel({
                 <div className="composer-tools">
                   <IconButton
                     icon="paperclip"
-                    label={
-                      demo ? "Attach local file" : "Attachments are planned"
-                    }
-                    disabled={!demo}
+                    label={uploadingFile ? "Uploading…" : "Attach file"}
+                    disabled={!live || uploadingFile}
                     onClick={() => file.current?.click()}
                   />
                   <IconButton
@@ -620,7 +876,9 @@ export function ChatPanel({
                   <Button
                     variant="primary"
                     icon="send"
-                    disabled={!live || (!text.trim() && !attachment)}
+                    disabled={
+                      !live || uploadingFile || (!text.trim() && !attachment)
+                    }
                     onClick={send}
                   >
                     {editing !== null ? "Save edit" : "Send"}
@@ -652,25 +910,12 @@ export function ChatPanel({
                 type="file"
                 ref={file}
                 tabIndex={-1}
-                onChange={(e) => {
-                  const chosen = e.target.files?.[0];
-                  if (chosen) {
-                    if (chosen.size > 20 * 1024 * 1024) {
-                      toast("Attachments must be smaller than 20 MB.", true);
-                      return;
-                    }
-                    setAttachment({
-                      name: chosen.name,
-                      type: chosen.type,
-                      url: URL.createObjectURL(chosen),
-                    });
-                  }
-                  e.target.value = "";
-                }}
+                onChange={handleFileSelect}
               />
-              {text && (
+              {typingUsers.length > 0 && (
                 <span className="typing-status">
-                  You are writing a {demo ? "local demo message" : "draft"}…
+                  {typingUsers.join(", ")}{" "}
+                  {typingUsers.length === 1 ? "is" : "are"} typing…
                 </span>
               )}
             </>
@@ -680,11 +925,23 @@ export function ChatPanel({
       {deleting !== null && (
         <Confirm
           title="Delete this message?"
-          description="The message will be removed from this demo conversation."
+          description="This message will be marked as deleted for everyone in the room."
           confirmLabel="Delete message"
           onClose={() => setDeleting(null)}
           onConfirm={() => {
-            setMessages((prev) => prev.filter((_, i) => i !== deleting));
+            const target = messages[deleting];
+            if (demo) {
+              setMessages((prev) => prev.filter((_, i) => i !== deleting));
+            } else {
+              update(deleting, {
+                deleted: true,
+                message: "[Tin nhắn đã bị xóa]",
+                reactions: [],
+              });
+              if (target?.id && onDelete) {
+                void onDelete(target.id);
+              }
+            }
             setDeleting(null);
             setSelected(null);
           }}

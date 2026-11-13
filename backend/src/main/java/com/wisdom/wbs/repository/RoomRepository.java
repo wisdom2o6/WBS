@@ -9,5 +9,9 @@ import java.util.UUID;
 
 @Repository
 public interface RoomRepository extends JpaRepository<Room, UUID> {
+    
+    // Add this method to resolve the compilation error
     List<Room> findByProjectId(UUID projectId);
+    
+    List<Room> findByProjectWorkspaceId(UUID workspaceId);
 }

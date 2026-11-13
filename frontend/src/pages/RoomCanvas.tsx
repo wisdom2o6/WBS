@@ -76,11 +76,29 @@ interface UserCursor {
 
 interface ChatApiMessage {
   id?: string | number;
+  clientMessageId?: string;
   senderId?: string;
   senderName?: string;
   senderUsername?: string;
-  content: string;
+  content?: string;
+  message?: string;
+  attachmentUrl?: string;
   timestamp?: string;
+  replyToId?: string;
+  replyTo?: string;
+  pinned?: boolean;
+  edited?: boolean;
+  deleted?: boolean;
+  reactions?: { icon: string; users: string[] }[];
+  attachment?: {
+    id?: string;
+    name?: string;
+    fileName?: string;
+    url?: string;
+    fileUrl?: string;
+    type?: string;
+    fileType?: string;
+  };
 }
 
 const isUUID = (value?: string) =>
@@ -89,33 +107,81 @@ const isUUID = (value?: string) =>
     value,
   );
 
+const formatChatTime = (raw?: string): string => {
+  if (!raw) {
+    return new Date().toLocaleTimeString("en", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
+};
+
 async function toChatMessage(
   item: ChatApiMessage,
   roomId: string,
 ): Promise<ChatMessage> {
-  let content = item.content;
-  try {
-    content = await decryptMessage(item.content, roomId);
-  } catch {
-    // Legacy plaintext messages remain readable.
+  const mappedAttachment = item.attachment
+    ? {
+        id: item.attachment.id ? String(item.attachment.id) : undefined,
+        name: item.attachment.name || item.attachment.fileName || "Attachment",
+        url: item.attachment.url || item.attachment.fileUrl || "",
+        type:
+          item.attachment.type ||
+          item.attachment.fileType ||
+          "application/octet-stream",
+      }
+    : undefined;
+
+  const cipher = item.message ?? item.content ?? "";
+  let plain = cipher;
+  if (!item.deleted && cipher) {
+    try {
+      plain = await decryptMessage(cipher, roomId);
+    } catch {
+      // Giữ nguyên plaintext nếu là tin nhắn cũ chưa mã hóa
+    }
   }
+
+  let replyPreview = item.replyTo;
+  if (replyPreview && replyPreview.includes(": ")) {
+    const splitIdx = replyPreview.indexOf(": ");
+    const prefix = replyPreview.slice(0, splitIdx);
+    const replyCipher = replyPreview.slice(splitIdx + 2);
+    try {
+      const replyPlain = await decryptMessage(replyCipher, roomId);
+      replyPreview = `${prefix}: ${replyPlain}`;
+    } catch {
+      // Bỏ qua nếu không phải ciphertext
+    }
+  }
+
   const sender =
     [item.senderName, item.senderUsername].find((name) => name && !isUUID(name)) ||
     "Member";
+
   return {
     id: item.id === undefined ? undefined : String(item.id),
+    clientMessageId: item.clientMessageId,
     senderUsername: sender,
-    message: content,
-    timestamp:
-      item.timestamp ||
-      new Date().toLocaleTimeString("en", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
+    message: item.deleted ? "[Tin nhắn đã bị xóa]" : plain,
+    timestamp: formatChatTime(item.timestamp),
+    replyToId: item.replyToId,
+    replyTo: replyPreview,
+    pinned: item.pinned,
+    edited: item.edited,
+    deleted: item.deleted,
+    reactions: item.reactions || [],
+    attachment: mappedAttachment,
+    attachmentUrl: item.attachmentUrl,
   };
 }
 
-const API = "http://localhost:8080";
+export const API =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
+  "http://localhost:8080";
 const PLEX = "IBM Plex Sans, sans-serif";
 
 // Component phụ render Ảnh trên Konva Canvas (supports stretch / contain / cover)
@@ -414,6 +480,10 @@ export const RoomCanvas: React.FC<{
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+
   const stompClientRef = useRef<Client | null>(null);
   const stageRef = useRef<any>(null);
   const transformerRef = useRef<any>(null);
@@ -604,30 +674,72 @@ export const RoomCanvas: React.FC<{
           }
         });
 
-        // 4. Subscribe Room Chat — reconcile our own optimistic messages.
+        // 4. Subscribe Room Chat — reconcile optimistic messages
         client.subscribe(`/topic/room/${roomId}/chat`, (message) => {
           void (async () => {
             try {
-              const chatMessage = await toChatMessage(
-                JSON.parse(message.body) as ChatApiMessage,
-                roomId,
-              );
+              const raw = JSON.parse(message.body) as ChatApiMessage;
+              const chatMessage = await toChatMessage(raw, roomId);
               setMessages((prev) => {
                 const index = prev.findIndex(
                   (m) =>
-                    m.status === "sending" &&
-                    m.message === chatMessage.message,
+                    (raw.clientMessageId &&
+                      m.clientMessageId === raw.clientMessageId) ||
+                    (m.status === "sending" && m.message === chatMessage.message),
                 );
-                if (index >= 0)
+                if (index >= 0) {
                   return prev.map((m, i) =>
-                    i === index ? { ...chatMessage, replyTo: m.replyTo } : m,
+                    i === index
+                      ? {
+                          ...chatMessage,
+                          replyTo: chatMessage.replyTo || m.replyTo,
+                          attachment: chatMessage.attachment || m.attachment,
+                        }
+                      : m,
                   );
+                }
+                if (chatMessage.id && prev.some((m) => m.id === chatMessage.id)) {
+                  return prev;
+                }
                 return [...prev, chatMessage];
               });
             } catch (error) {
               setCanvasError(errorMessage(error));
             }
           })();
+        });
+
+        // 5. Subscribe Chat Events (UPDATED, DELETED, PINNED, REACTED)
+        client.subscribe(`/topic/room/${roomId}/chat.events`, (message) => {
+          void (async () => {
+            try {
+              const event = JSON.parse(message.body) as {
+                type: "UPDATED" | "DELETED" | "PINNED" | "REACTED";
+                payload: ChatApiMessage;
+              };
+              const updated = await toChatMessage(event.payload, roomId);
+              if (!updated.id) return;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m)),
+              );
+            } catch (error) {
+              setCanvasError(errorMessage(error));
+            }
+          })();
+        });
+
+        // 6. Subscribe Typing Indicator
+        client.subscribe(`/topic/room/${roomId}/typing`, (message) => {
+          const data = JSON.parse(message.body) as {
+            username?: string;
+            typing?: boolean;
+          };
+          if (!data.username || data.username === user?.username) return;
+          setTypingUsers((prev) =>
+            data.typing
+              ? Array.from(new Set([...prev, data.username!]))
+              : prev.filter((u) => u !== data.username),
+          );
         });
       },
       onWebSocketClose: () => {
@@ -660,7 +772,7 @@ export const RoomCanvas: React.FC<{
     if (demo || !roomId || !token) return;
     let active = true;
     axios
-      .get(`${API}/api/rooms/${roomId}/messages?limit=50`, {
+      .get(`${API}/api/v1/rooms/${roomId}/messages`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then(async (response) => {
@@ -674,7 +786,10 @@ export const RoomCanvas: React.FC<{
             toChatMessage(item, roomId),
           ),
         );
-        if (active) setMessages(history);
+        if (active) {
+          setMessages(history);
+          setHasMoreHistory(history.length >= 50);
+        }
       })
       .catch((error) => {
         if (active) setCanvasError(errorMessage(error));
@@ -683,6 +798,7 @@ export const RoomCanvas: React.FC<{
       active = false;
     };
   }, [demo, roomId, token]);
+
   const retryConnection = async () => {
     const client = stompClientRef.current;
     if (!client) return;
@@ -945,21 +1061,132 @@ export const RoomCanvas: React.FC<{
     }
   };
 
-  const handleSendMessage = async (message: string) => {
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const handleLoadMoreMessages = async () => {
+    if (demo || !roomId || !token || loadingMoreHistory || !hasMoreHistory)
+      return;
+    const oldestId = messages.find((m) => m.id && !m.system)?.id;
+    if (!oldestId) return;
+    setLoadingMoreHistory(true);
+    try {
+      const res = await axios.get(
+        `${API}/api/v1/rooms/${roomId}/messages?before=${oldestId}`,
+        { headers: authHeaders },
+      );
+      const list = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.messages)
+          ? res.data.messages
+          : [];
+      const older = await Promise.all(
+        (list as ChatApiMessage[]).map((item) => toChatMessage(item, roomId)),
+      );
+      setMessages((prev) => [...older, ...prev]);
+      setHasMoreHistory(older.length >= 50);
+    } catch (err) {
+      toast(errorMessage(err), true);
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  };
+
+  const handleSendMessage = async (
+    message: string,
+    options?: {
+      clientMessageId?: string;
+      replyToId?: string;
+      attachmentFileId?: string;
+    },
+  ) => {
     if (!message.trim() || !stompClientRef.current?.connected || !roomId)
       return false;
-    const encrypted = await encryptMessage(message.trim(), roomId);
+    try {
+      const encrypted = await encryptMessage(message.trim(), roomId);
+      stompClientRef.current.publish({
+        destination: `/app/room/${roomId}/chat.send`,
+        body: JSON.stringify({
+          roomId,
+          clientMessageId: options?.clientMessageId,
+          replyToId: options?.replyToId,
+          attachmentFileId: options?.attachmentFileId,
+          senderId: user?.id || user?.userId || user?.username || "",
+          senderName: user?.fullName || user?.username || "Member",
+          content: encrypted,
+          message: encrypted,
+          pinned: false,
+          edited: false,
+          deleted: false,
+          encryptionMode: "E2EE_AES_GCM",
+          keyVersion: 1,
+          timestamp: new Date().toISOString(),
+        }),
+      });
+      return true;
+    } catch (err) {
+      toast(errorMessage(err), true);
+      return false;
+    }
+  };
+
+  const handleEditMessage = async (messageId: string, newPlainText: string) => {
+    if (demo || !roomId || !token || !newPlainText.trim()) return;
+    try {
+      const encrypted = await encryptMessage(newPlainText.trim(), roomId);
+      await axios.patch(
+        `${API}/api/v1/rooms/${roomId}/messages/${messageId}`,
+        { message: encrypted },
+        { headers: authHeaders },
+      );
+    } catch (err) {
+      toast(errorMessage(err), true);
+    }
+  };
+
+  const handleDeleteMessage = async (messageId: string) => {
+    if (demo || !roomId || !token) return;
+    try {
+      await axios.delete(
+        `${API}/api/v1/rooms/${roomId}/messages/${messageId}`,
+        { headers: authHeaders },
+      );
+    } catch (err) {
+      toast(errorMessage(err), true);
+    }
+  };
+
+  const handlePinMessage = async (messageId: string, pinned: boolean) => {
+    if (demo || !roomId || !token) return;
+    try {
+      await axios.post(
+        `${API}/api/v1/rooms/${roomId}/messages/${messageId}/pin`,
+        { pinned },
+        { headers: authHeaders },
+      );
+    } catch (err) {
+      toast(errorMessage(err), true);
+    }
+  };
+
+  const handleToggleReaction = async (messageId: string, icon: string) => {
+    if (demo || !roomId || !token) return;
+    try {
+      await axios.post(
+        `${API}/api/v1/rooms/${roomId}/messages/${messageId}/reactions`,
+        { icon },
+        { headers: authHeaders },
+      );
+    } catch (err) {
+      toast(errorMessage(err), true);
+    }
+  };
+
+  const handleTyping = (isTyping: boolean) => {
+    if (demo || !roomId || !stompClientRef.current?.connected) return;
     stompClientRef.current.publish({
-      destination: `/app/room/${roomId}/chat.send`,
-      body: JSON.stringify({
-        roomId,
-        senderId: user?.id || user?.userId || user?.username || "",
-        senderName: user?.fullName || user?.username || "Member",
-        content: encrypted,
-        timestamp: new Date().toISOString(),
-      }),
+      destination: `/app/room/${roomId}/typing`,
+      body: JSON.stringify({ typing: isTyping }),
     });
-    return true;
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2063,6 +2290,17 @@ export const RoomCanvas: React.FC<{
           connected={connected}
           connection={demo ? "connected" : conn}
           onSend={handleSendMessage}
+          onEdit={handleEditMessage}
+          onDelete={handleDeleteMessage}
+          onPin={handlePinMessage}
+          onReact={handleToggleReaction}
+          onLoadMore={handleLoadMoreMessages}
+          hasMore={hasMoreHistory}
+          loadingMore={loadingMoreHistory}
+          typingUsers={typingUsers}
+          onTyping={handleTyping}
+          readOnly={readOnly}
+          role={role}
         />
       )}
       <div

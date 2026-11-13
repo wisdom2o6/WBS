@@ -1,10 +1,9 @@
 package com.wisdom.wbs.controller;
 
-import com.wisdom.wbs.dto.CanvasUpdateDTO;
-import com.wisdom.wbs.dto.ChatMessageDTO;
-import com.wisdom.wbs.dto.PresencePayload;
+import com.wisdom.wbs.dto.*;
 import com.wisdom.wbs.entity.User;
 import com.wisdom.wbs.repository.UserRepository;
+import com.wisdom.wbs.service.RoomChatService;
 import com.wisdom.wbs.service.RoomService;
 import com.wisdom.wbs.repository.RoomDocumentRepository;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +24,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class RoomRealtimeController {
 
+    private final RoomChatService roomChatService;
     private final RoomDocumentRepository roomDocumentRepository;
     private final RoomService roomService;
     private final UserRepository userRepository;
@@ -61,39 +61,18 @@ public class RoomRealtimeController {
             @DestinationVariable UUID roomId,
             @Payload ChatMessageDTO message,
             Principal principal) {
-        
-        message.setRoomId(roomId.toString());
-        if (message.getTimestamp() == null) {
-            message.setTimestamp(Instant.now().toString());
-        }
+        String text = message.getContent() != null ? message.getContent() : message.getMessage();
+        ChatSendRequest req = new ChatSendRequest();
+        req.setClientMessageId(message.getClientMessageId());
+        req.setMessage(text);
+        req.setReplyToId(message.getReplyToId());
+        req.setAttachmentFileId(message.getAttachmentFileId());
+        req.setEncryptionMode(message.getEncryptionMode());
+        req.setKeyVersion(message.getKeyVersion());
 
-        // 1. Tìm User trong DB dựa vào JWT Principal hoặc thông tin senderId/senderName từ DTO
-        String identifier = (principal != null) ? principal.getName() : message.getSenderId();
-        Optional<User> userOpt = findUser(identifier);
-
-        if (userOpt.isEmpty() && message.getSenderName() != null) {
-            userOpt = findUser(message.getSenderName());
-        }
-
-        if (userOpt.isPresent()) {
-            User user = userOpt.get();
-            message.setSenderId(user.getId().toString());
-            message.setSenderName(user.getFullName() != null ? user.getFullName() : user.getUsername());
-        } else {
-            if (message.getSenderName() == null || message.getSenderName().isBlank()) {
-                message.setSenderName("Wisdom");
-            }
-        }
-
-        // 2. Tiến hành lưu tin nhắn chat vào Database
-        try {
-            roomService.saveChatMessage(roomId, message);
-            log.info("Lưu tin nhắn thành công cho phòng: {}", roomId);
-        } catch (Exception e) {
-            log.error("Lỗi lưu tin nhắn chat vào DB: ", e);
-        }
-
-        return message;
+        String identifier = principal != null ? principal.getName()
+                : (message.getSenderName() != null ? message.getSenderName() : "Wisdom");
+        return roomChatService.saveMessageOnly(roomId, req, identifier);
     }
 
     private Optional<User> findUser(String identifier) {
