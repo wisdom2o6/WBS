@@ -6,6 +6,7 @@ import com.wisdom.wbs.dto.PresencePayload;
 import com.wisdom.wbs.entity.User;
 import com.wisdom.wbs.repository.UserRepository;
 import com.wisdom.wbs.service.RoomService;
+import com.wisdom.wbs.repository.RoomDocumentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.handler.annotation.DestinationVariable;
@@ -24,6 +25,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class RoomRealtimeController {
 
+    private final RoomDocumentRepository roomDocumentRepository;
     private final RoomService roomService;
     private final UserRepository userRepository;
 

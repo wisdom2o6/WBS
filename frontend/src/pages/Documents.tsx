@@ -5,6 +5,8 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
+import { Client } from "@stomp/stompjs";
+import SockJS from "sockjs-client";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
   Avatar,
@@ -25,6 +27,21 @@ import {
 import { Icon } from "../components/Icon";
 import type { Block, BlockKind, Document } from "../types/workspace";
 
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8080/api/v1";
+const WS_URL = import.meta.env.VITE_WS_URL || "http://localhost:8080/ws";
+
+// ID định danh riêng cho tab trình duyệt hiện tại để tránh tự nhận lại event của chính mình
+const TAB_CLIENT_ID = crypto.randomUUID();
+
+function getAuthHeaders(): HeadersInit {
+  const token =
+    localStorage.getItem("token") || localStorage.getItem("accessToken");
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 const blockNames: Record<BlockKind, string> = {
   paragraph: "Paragraph",
   heading1: "Heading 1",
@@ -40,17 +57,64 @@ const blockNames: Record<BlockKind, string> = {
   divider: "Divider",
   canvas: "Embed canvas",
 };
+
 export default function Documents({ roomId }: { roomId?: string }) {
   const { documentId } = useParams();
   const { documents, setDocuments, workspace, base, demo, logActivity } =
     useWorkspace();
+  const toast = useToast();
   const [params, setParams] = useSearchParams();
   const [creating, setCreating] = useState(params.has("create"));
+  const [submitting, setSubmitting] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [title, setTitle] = useState("");
   const [query, setQuery] = useState("");
   const [roomDocument, setRoomDocument] = useState("");
   const [deleteId, setDeleteId] = useState("");
   const navigate = useNavigate();
+
+  // 1. Tải danh sách tài liệu từ Backend khi vào Workspace hoặc Room
+  useEffect(() => {
+    if (demo || !workspace?.id) return;
+
+    let cancelled = false;
+    const fetchDocuments = async () => {
+      setLoading(true);
+      try {
+        const url = new URL(
+          `${API_BASE}/workspaces/${workspace.id}/documents`,
+        );
+        if (roomId) url.searchParams.set("roomId", roomId);
+
+        const res = await fetch(url.toString(), {
+          headers: getAuthHeaders(),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data: Document[] = await res.json();
+
+        if (!cancelled) {
+          setDocuments((prev) => {
+            const others = prev.filter(
+              (d) =>
+                d.workspaceId !== workspace.id ||
+                (roomId && d.roomId !== roomId),
+            );
+            return [...others, ...data];
+          });
+        }
+      } catch (err) {
+        console.error("Failed to load documents:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    fetchDocuments();
+    return () => {
+      cancelled = true;
+    };
+  }, [demo, workspace?.id, roomId, setDocuments]);
+
   const currentId = roomId ? roomDocument : documentId;
   const current = documents.find(
     (d) =>
@@ -64,6 +128,7 @@ export default function Documents({ roomId }: { roomId?: string }) {
       (!roomId || d.roomId === roomId) &&
       d.title.toLowerCase().includes(query.toLowerCase()),
   );
+
   if (current)
     return (
       <DocumentEditor
@@ -71,11 +136,12 @@ export default function Documents({ roomId }: { roomId?: string }) {
         onBack={roomId ? () => setRoomDocument("") : undefined}
       />
     );
-  if (documentId && !roomId)
+
+  if (documentId && !roomId && !loading)
     return (
       <EmptyState
         title="Document not found"
-        description="This document may belong to another workspace or an earlier demo session."
+        description="This document may belong to another workspace or has been deleted."
         action={
           <Link className="btn btn-secondary" to={`${base}/documents`}>
             All documents
@@ -83,6 +149,97 @@ export default function Documents({ roomId }: { roomId?: string }) {
         }
       />
     );
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!workspace || submitting) return;
+
+    const projectId =
+      params.get("project") ||
+      workspace.projects.find((p) => p.rooms.some((r) => r.id === roomId))?.id;
+
+    const initialBlocks: Block[] = [
+      { id: crypto.randomUUID(), kind: "paragraph", text: "" },
+    ];
+
+    if (demo) {
+      const id = crypto.randomUUID();
+      const doc: Document = {
+        id,
+        title: title.trim(),
+        description: "",
+        author: "Alex Morgan",
+        workspaceId: workspace.id,
+        projectId,
+        roomId,
+        updatedAt: new Date().toISOString(),
+        blocks: initialBlocks,
+      };
+      setDocuments((prev) => [...prev, doc]);
+      finishCreate(id, doc.title);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/workspaces/${workspace.id}/documents`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            title: title.trim(),
+            description: "",
+            projectId: projectId || null,
+            roomId: roomId || null,
+            blocks: initialBlocks,
+          }),
+        },
+      );
+      if (!res.ok) throw new Error(`Create failed (${res.status})`);
+      const created: Document = await res.json();
+      setDocuments((prev) => [...prev, created]);
+      finishCreate(created.id, created.title);
+    } catch (err) {
+      console.error(err);
+      toast("Không thể tạo tài liệu trên server.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const finishCreate = (id: string, docTitle: string) => {
+    logActivity("created a document", docTitle, `/documents/${id}`, "file");
+    setTitle("");
+    setCreating(false);
+    setParams({});
+    if (roomId) setRoomDocument(id);
+    else navigate(`${base}/documents/${id}`);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteId) return;
+    const targetId = deleteId;
+    setDeleteId("");
+
+    if (!demo) {
+      try {
+        const res = await fetch(`${API_BASE}/documents/${targetId}`, {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        });
+        if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+      } catch (err) {
+        console.error(err);
+        toast("Xóa tài liệu thất bại.");
+        return;
+      }
+    }
+
+    setDocuments((prev) => prev.filter((d) => d.id !== targetId));
+    toast("Đã xóa tài liệu.");
+  };
+
   return (
     <div className={roomId ? "room-resource-page" : "page"}>
       <div className="page-heading">
@@ -103,11 +260,14 @@ export default function Documents({ roomId }: { roomId?: string }) {
           New document
         </Button>
       </div>
-      <Notice>
-        {demo
-          ? "Sample documents and local drafts. Editing works in this session; real-time co-editing is not connected."
-          : "Document persistence and collaboration are not available on this backend. Documents created here are session-only drafts. Download a copy before leaving."}
-      </Notice>
+
+      {demo && (
+        <Notice>
+          Sample documents and local drafts. Editing works in this session;
+          real-time co-editing is disabled in demo mode.
+        </Notice>
+      )}
+
       <div className="list-toolbar">
         <div className="search-input">
           <Icon name="search" />
@@ -118,8 +278,11 @@ export default function Documents({ roomId }: { roomId?: string }) {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <span className="muted">{items.length} documents</span>
+        <span className="muted">
+          {loading ? "Loading…" : `${items.length} documents`}
+        </span>
       </div>
+
       <div className="document-list">
         {items.map((d) => (
           <div key={d.id}>
@@ -139,7 +302,7 @@ export default function Documents({ roomId }: { roomId?: string }) {
                 <strong>{d.title}</strong>
                 <small>{d.description || "A new page of possibilities."}</small>
               </span>
-              <Badge>Local draft</Badge>
+              <Badge>{demo ? "Local draft" : "Synced"}</Badge>
               <span className="muted small-text">{d.author}</span>
               <Icon name="chevron" size={16} />
             </Button>
@@ -151,7 +314,8 @@ export default function Documents({ roomId }: { roomId?: string }) {
           </div>
         ))}
       </div>
-      {!items.length && (
+
+      {!loading && !items.length && (
         <EmptyState
           icon="file"
           title="Give your ideas a home"
@@ -163,54 +327,16 @@ export default function Documents({ roomId }: { roomId?: string }) {
           }
         />
       )}
+
       {(creating || params.has("create")) && (
         <Modal
-          title="Create a local document"
+          title={demo ? "Create a local document" : "Create a shared document"}
           onClose={() => {
             setCreating(false);
             setParams({});
           }}
         >
-          <form
-            className="form-stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!workspace) return;
-              const id = crypto.randomUUID();
-              const doc: Document = {
-                id,
-                title: title.trim(),
-                description: "",
-                author: demo ? "Alex Morgan" : "You",
-                workspaceId: workspace.id,
-                projectId:
-                  params.get("project") ||
-                  workspace.projects.find((p) =>
-                    p.rooms.some((r) => r.id === roomId),
-                  )?.id,
-                roomId,
-                updatedAt: new Date().toISOString(),
-                blocks: [
-                  { id: crypto.randomUUID(), kind: "paragraph", text: "" },
-                ],
-              };
-              setDocuments((prev) => [...prev, doc]);
-              logActivity(
-                "created a local document",
-                doc.title,
-                `/documents/${id}`,
-                "file",
-              );
-              setCreating(false);
-              setParams({});
-              if (roomId) setRoomDocument(id);
-              else navigate(`${base}/documents/${id}`);
-            }}
-          >
-            <Notice>
-              This document is a session-only local draft, not a synchronized
-              team document.
-            </Notice>
+          <form className="form-stack" onSubmit={handleCreate}>
             <Field label="Document title">
               <Input
                 required
@@ -222,22 +348,24 @@ export default function Documents({ roomId }: { roomId?: string }) {
               />
             </Field>
             <div className="modal-actions">
-              <Button type="submit" variant="primary">
-                Create document
+              <Button type="submit" variant="primary" disabled={submitting}>
+                {submitting ? "Creating…" : "Create document"}
               </Button>
             </div>
           </form>
         </Modal>
       )}
+
       {deleteId && (
         <Confirm
-          title="Delete this draft?"
-          description="This removes the document from the current session."
+          title="Delete this document?"
+          description={
+            demo
+              ? "This removes the document from the current session."
+              : "This permanently deletes the document for all workspace members."
+          }
           onClose={() => setDeleteId("")}
-          onConfirm={() => {
-            setDocuments((prev) => prev.filter((d) => d.id !== deleteId));
-            setDeleteId("");
-          }}
+          onConfirm={handleDelete}
         />
       )}
     </div>
@@ -251,42 +379,140 @@ function DocumentEditor({
   document: Document;
   onBack?: () => void;
 }) {
-  const { setDocuments, workspace, base } = useWorkspace();
+  const { setDocuments, workspace, base, demo } = useWorkspace();
   const toast = useToast();
   const [selected, setSelected] = useState<string | null>(null);
-  const [status, setStatus] = useState("Local draft");
+  const [status, setStatus] = useState(demo ? "Local draft" : "Synced");
+  const [liveConnected, setLiveConnected] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [comment, setComment] = useState("");
   const [comments, setComments] = useState<string[]>([]);
   const [versions, setVersions] = useState<Document[]>([]);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stompRef = useRef<Client | null>(null);
+  const latestDocRef = useRef<Document>(doc);
   const editor = useRef<HTMLDivElement>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
+
+  latestDocRef.current = doc;
+
+  // 2. Kết nối WebSocket STOMP để đồng bộ Real-time giữa các thành viên
+  useEffect(() => {
+    if (demo) return;
+
+    const token =
+      localStorage.getItem("token") || localStorage.getItem("accessToken");
+    const client = new Client({
+      webSocketFactory: () => new SockJS(WS_URL),
+      connectHeaders: token ? { Authorization: `Bearer ${token}` } : {},
+      reconnectDelay: 3000,
+      onConnect: () => {
+        setLiveConnected(true);
+        client.subscribe(`/topic/doc.${doc.id}`, (frame) => {
+          try {
+            const payload = JSON.parse(frame.body);
+            // Bỏ qua gói tin do chính tab này gửi lên
+            if (payload.senderId === TAB_CLIENT_ID) return;
+
+            setDocuments((prev) =>
+              prev.map((d) =>
+                d.id === doc.id
+                  ? {
+                      ...d,
+                      title: payload.title ?? d.title,
+                      description: payload.description ?? d.description,
+                      blocks: payload.blocks ?? d.blocks,
+                      updatedAt: payload.updatedAt || new Date().toISOString(),
+                    }
+                  : d,
+              ),
+            );
+            setStatus("Updated by collaborator");
+          } catch (e) {
+            console.error("Invalid STOMP document payload:", e);
+          }
+        });
+      },
+      onDisconnect: () => setLiveConnected(false),
+      onStompError: () => setLiveConnected(false),
+    });
+
+    client.activate();
+    stompRef.current = client;
+
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      client.deactivate();
+      stompRef.current = null;
+    };
+  }, [demo, doc.id, setDocuments]);
+
+  // 3. Cập nhật state + Broadcast STOMP ngay lập tức + Debounce lưu DB
   const update = (patch: Partial<Document>) => {
+    const nextDoc: Document = {
+      ...latestDocRef.current,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+
     setDocuments((prev) =>
-      prev.map((d) =>
-        d.id === doc.id
-          ? { ...d, ...patch, updatedAt: new Date().toISOString() }
-          : d,
-      ),
+      prev.map((d) => (d.id === doc.id ? nextDoc : d)),
     );
-    setStatus("Updating local draft…");
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(
-      () => setStatus("Up to date · this session only"),
-      600,
-    );
+
+    if (demo) {
+      setStatus("Updating local draft…");
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(
+        () => setStatus("Up to date · this session only"),
+        600,
+      );
+      return;
+    }
+
+    // Gửi real-time cho các thành viên khác đang mở cùng document
+    if (stompRef.current?.connected) {
+      stompRef.current.publish({
+        destination: `/app/doc.${doc.id}.update`,
+        body: JSON.stringify({
+          senderId: TAB_CLIENT_ID,
+          documentId: doc.id,
+          title: nextDoc.title,
+          description: nextDoc.description,
+          blocks: nextDoc.blocks,
+          updatedAt: nextDoc.updatedAt,
+        }),
+      });
+    }
+
+    // Debounce lưu xuống PostgreSQL sau 600ms ngừng gõ
+    setStatus("Saving…");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/documents/${doc.id}`, {
+          method: "PUT",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            title: nextDoc.title,
+            description: nextDoc.description,
+            blocks: nextDoc.blocks,
+          }),
+        });
+        if (!res.ok) throw new Error(`Save failed (${res.status})`);
+        setStatus("Saved to cloud");
+      } catch (err) {
+        console.error(err);
+        setStatus("Save failed · retrying on next edit");
+      }
+    }, 600);
   };
+
   const blockUpdate = (id: string, patch: Partial<Block>) =>
     update({
       blocks: doc.blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)),
     });
+
   const move = (index: number, delta: number) => {
     const blocks = [...doc.blocks];
     if (!blocks[index + delta]) return;
@@ -296,6 +522,7 @@ function DocumentEditor({
     ];
     update({ blocks });
   };
+
   const addBlock = (kind: BlockKind = "paragraph") => {
     const block: Block = {
       id: crypto.randomUUID(),
@@ -311,6 +538,7 @@ function DocumentEditor({
     update({ blocks });
     setSelected(block.id);
   };
+
   const format = (marker: string) => {
     const field = editor.current?.querySelector<HTMLTextAreaElement>(
       `[data-block="${selected}"]`,
@@ -330,12 +558,27 @@ function DocumentEditor({
         marker +
         value.slice(end),
     });
-    toast("Markdown formatting added to this local draft.");
   };
+
   const download = () => {
     const blob = new Blob(
       [
-        `# ${doc.title}\n\n${doc.description}\n\n${doc.blocks.map((b) => `${b.kind.startsWith("heading") ? "#".repeat(Number(b.kind.at(-1))) + " " : b.kind === "bullet" ? "- " : b.kind === "quote" ? "> " : b.kind === "checklist" ? `- [${b.checked ? "x" : " "}] ` : ""}${b.text}`).join("\n\n")}`,
+        `# ${doc.title}\n\n${doc.description}\n\n${doc.blocks
+          .map(
+            (b) =>
+              `${
+                b.kind.startsWith("heading")
+                  ? "#".repeat(Number(b.kind.at(-1))) + " "
+                  : b.kind === "bullet"
+                    ? "- "
+                    : b.kind === "quote"
+                      ? "> "
+                      : b.kind === "checklist"
+                        ? `- [${b.checked ? "x" : " "}] `
+                        : ""
+              }${b.text}`,
+          )
+          .join("\n\n")}`,
       ],
       { type: "text/markdown" },
     );
@@ -346,6 +589,7 @@ function DocumentEditor({
     a.click();
     URL.revokeObjectURL(url);
   };
+
   return (
     <div className="document-editor">
       <div className="document-topbar">
@@ -367,18 +611,19 @@ function DocumentEditor({
         </span>
         <IconButton
           icon="clock"
-          label="Local version snapshots"
+          label="Version snapshots"
           onClick={() => setHistoryOpen(true)}
         />
         <IconButton
           icon="chat"
-          label="Local document comments"
+          label="Document comments"
           onClick={() => setCommentsOpen(true)}
         />
         <Button icon="download" onClick={download}>
           Export
         </Button>
       </div>
+
       <div className="formatting-toolbar">
         <Button
           variant="ghost"
@@ -410,13 +655,18 @@ function DocumentEditor({
           ))}
         </Select>
         <span className="small-text muted">
-          Local draft · No live co-editing
+          {demo
+            ? "Local draft · No live co-editing"
+            : liveConnected
+              ? "Live co-editing connected"
+              : "Connecting live sync…"}
         </span>
       </div>
+
       <div className="document-paper" ref={editor}>
         <div className="document-kicker">
           <Badge>{workspace?.name}</Badge>
-          <span>LOCAL DOCUMENT</span>
+          <span>{demo ? "LOCAL DOCUMENT" : "COLLABORATIVE DOCUMENT"}</span>
         </div>
         <Input
           className="document-title"
@@ -446,6 +696,7 @@ function DocumentEditor({
             })}
           </span>
         </div>
+
         <div className="document-blocks">
           {doc.blocks.map((block, index) => (
             <div
@@ -470,6 +721,7 @@ function DocumentEditor({
                 />
                 <Icon name="drag" size={14} />
               </div>
+
               {block.kind === "divider" ? (
                 <hr />
               ) : block.kind === "canvas" ? (
@@ -584,6 +836,7 @@ function DocumentEditor({
                   )}
                 </>
               )}
+
               {selected === block.id && (
                 <div className="block-actions">
                   <Select
@@ -639,6 +892,7 @@ function DocumentEditor({
             </div>
           ))}
         </div>
+
         <Button
           variant="ghost"
           icon="plus"
@@ -647,26 +901,26 @@ function DocumentEditor({
         >
           Add a block
         </Button>
+
         <div className="document-footnote">
           <Icon name="info" size={14} />
-          Changes live in this session only. Export a copy to keep your work.
+          {demo
+            ? "Changes live in this session only. Export a copy to keep your work."
+            : "Changes are automatically saved and synced with your workspace."}
         </div>
       </div>
+
       {historyOpen && (
         <Modal
-          title="Local version snapshots"
+          title="Version snapshots"
           onClose={() => setHistoryOpen(false)}
         >
           <div className="form-stack">
-            <Notice>
-              Version history is local to this editor session. No server
-              versions are available.
-            </Notice>
             <Button
               icon="plus"
               onClick={() => {
                 setVersions((prev) => [structuredClone(doc), ...prev]);
-                toast("Local snapshot created.");
+                toast("Snapshot created.");
               }}
             >
               Create snapshot
@@ -693,15 +947,13 @@ function DocumentEditor({
           </div>
         </Modal>
       )}
+
       {commentsOpen && (
         <Modal
-          title="Local draft comments"
+          title="Document notes"
           onClose={() => setCommentsOpen(false)}
         >
           <div className="form-stack">
-            <Notice>
-              Comments are local notes, not shared with collaborators.
-            </Notice>
             {comments.map((c, i) => (
               <p className="local-comment" key={i}>
                 {c}
@@ -722,10 +974,10 @@ function DocumentEditor({
                 value={comment}
                 onChange={(e) => setComment(e.target.value)}
                 aria-label="Comment"
-                placeholder="Leave a note for yourself…"
+                placeholder="Leave a note…"
               />
               <Button variant="primary" type="submit">
-                Add local note
+                Add note
               </Button>
             </form>
           </div>

@@ -64,21 +64,6 @@ public class WorkspaceController {
         return ResponseEntity.ok(workspaceService.getRoomsByProject(projectId));
     }
 
-    // MEMBERS
-    @PostMapping("/workspaces/{workspaceId}/members")
-    public ResponseEntity<Map<String, String>> addMember(
-            @PathVariable UUID workspaceId,
-            @RequestBody Map<String, String> body) {
-        String usernameOrEmail = body.get("usernameOrEmail");
-        workspaceService.addMemberToWorkspace(workspaceId, usernameOrEmail, UserRole.MEMBER);
-        return ResponseEntity.ok(Map.of("message", "Đã thêm thành viên thành công"));
-    }
-
-    @GetMapping("/workspaces/{workspaceId}/members")
-    public ResponseEntity<List<WorkspaceMemberResponse>> getWorkspaceMembers(@PathVariable UUID workspaceId) {
-        return ResponseEntity.ok(workspaceService.getWorkspaceMembers(workspaceId));
-    }
-
     @GetMapping("/rooms/{roomId}/canvas")
     public ResponseEntity<List<Object>> getRoomCanvas(@PathVariable UUID roomId) {
         return ResponseEntity.ok(canvasPersistenceService.getRoomCanvasShapes(roomId));
