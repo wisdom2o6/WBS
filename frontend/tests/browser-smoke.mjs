@@ -69,7 +69,7 @@ const nav = async (path) => {
 };
 const click = async (text) =>
   evaluate(
-    `(()=>{const e=[...(document.querySelector('[role=dialog]') || document).querySelectorAll('button,a')].find(e=>{const copy=e.cloneNode(true);copy.querySelectorAll('.tab-count,.nav-count').forEach(n=>n.remove());return copy.textContent.trim()===${JSON.stringify(text)} || [...e.children].some(c=>c.tagName==='SPAN' && c.textContent.trim()===${JSON.stringify(text)});});if(!e)throw new Error('Missing control: '+${JSON.stringify(text)}); e.click(); return true})()`,
+    `(()=>{const e=[...(document.querySelector('[role=dialog]') || document).querySelectorAll('button,a')].find(e=>{const copy=e.cloneNode(true);copy.querySelectorAll('.tab-count,.nav-count,.planned-badge').forEach(n=>n.remove());return copy.textContent.trim()===${JSON.stringify(text)} || [...e.children].some(c=>c.tagName==='SPAN' && c.textContent.trim()===${JSON.stringify(text)});});if(!e)throw new Error('Missing control: '+${JSON.stringify(text)}); e.click(); return true})()`,
   );
 const clickLabel = async (label) =>
   evaluate(
@@ -136,7 +136,7 @@ await evaluate(
 );
 await assert(
   "room context menu opens",
-  'document.querySelectorAll("[role=menu] button").length===3',
+  'document.querySelectorAll("[role=menu] button").length===7',
 );
 await send("Input.dispatchKeyEvent", {
   type: "keyDown",
@@ -189,6 +189,8 @@ await assert(
   "Konva stage rendered",
   'document.querySelector("canvas").width>0',
 );
+if (!(await evaluate('!!document.querySelector(".canvas-layers")')))
+  await clickLabel("Toggle layers");
 await clickLabel("Rectangle (R)");
 const stage = await evaluate(
   '(()=>{const r=document.querySelector(".canvas-stage-container").getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}})()',
@@ -235,6 +237,47 @@ await clickLabel("Redo (Ctrl/⌘ Shift Z)");
 await assert(
   "canvas redo restores duplicate",
   'document.querySelectorAll(".canvas-layer-row").length===11',
+);
+await evaluate(
+  `document.querySelectorAll(".canvas-layer-row button[aria-pressed]")[0].click()`,
+);
+await wait(
+  'document.querySelectorAll(".canvas-layer-row button[aria-pressed]")[0].getAttribute("aria-pressed")==="true"',
+);
+await evaluate(
+  `document.querySelectorAll(".canvas-layer-row button[aria-pressed]")[1].dispatchEvent(new MouseEvent("click",{bubbles:true,shiftKey:true}))`,
+);
+await assert(
+  "layers shift-click multi-selects",
+  'document.querySelector(".canvas-inspector").innerText.includes("2 objects selected")',
+);
+await clickLabel("Align left");
+await assert(
+  "alignment keeps object count",
+  'document.querySelectorAll(".canvas-layer-row").length===11',
+);
+await send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  x: stage.x + stage.width - 40,
+  y: stage.y + stage.height - 40,
+  button: "right",
+  clickCount: 1,
+});
+await send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  x: stage.x + stage.width - 40,
+  y: stage.y + stage.height - 40,
+  button: "right",
+  clickCount: 1,
+});
+await assert(
+  "canvas context menu opens",
+  '!!document.querySelector(".canvas-context-menu") && document.querySelector(".canvas-context-menu").innerText.includes("Fit to screen")',
+);
+await click("Fit to screen");
+await assert(
+  "fit to screen applies and closes menu",
+  '!document.querySelector(".canvas-context-menu") && /^\\d+%$/.test(document.querySelector(".zoom-menu").innerText.trim())',
 );
 await click("PNG");
 await downloaded(".png");
@@ -291,6 +334,15 @@ await assert(
   "document block added",
   'document.querySelectorAll(".document-block").length===12',
 );
+await click("Insert block");
+await wait('!!document.querySelector(".block-menu")');
+await evaluate(
+  `[...document.querySelectorAll(".block-menu button")].find(b=>b.innerText.includes("Checklist")).click()`,
+);
+await assert(
+  "block menu inserts typed block",
+  'document.querySelectorAll(".document-block").length===13 && document.querySelectorAll(".block-checklist").length===4',
+);
 await screenshot("wbs-document");
 await click("Export");
 await downloaded(".md");
@@ -319,14 +371,14 @@ await assert(
   'document.querySelector(".media-gallery").innerText.includes("QA renamed.svg")',
 );
 await clickLabel("Remove QA renamed.svg");
-await click("Delete");
+await click("Remove from library");
 await assert(
   "file removal confirmation works",
   'document.querySelectorAll(".asset-card").length===3',
 );
 await click("Members");
 await wait('!!document.querySelector(".members-table")');
-await click("Add sample member");
+await click("Invite member");
 await setField("[role=dialog] input", "qa@example.test");
 await click("Add member");
 await wait('!document.querySelector("[role=dialog]")');
@@ -368,15 +420,54 @@ await assert(
   'document.querySelectorAll(".task-row.done").length===2',
 );
 await evaluate('document.querySelector(".notification-button").click()');
+await wait('!!document.querySelector(".notification-menu")');
+await click("View all notifications");
 await wait('!!document.querySelector(".notification-list")');
 await click("Mark all as read");
 await assert(
   "notification read state updates",
   'document.querySelectorAll(".notification-row.unread").length===0',
 );
+await evaluate(
+  'document.querySelector(".demo-role-switch .dropdown-trigger").click()',
+);
+await evaluate(
+  `[...document.querySelectorAll(".demo-role-switch [role=menuitem]")].find(b=>b.innerText.includes("Viewer")).click()`,
+);
+await click("Members");
+await wait('!!document.querySelector(".members-table")');
+await assert(
+  "viewer cannot see member management",
+  '!document.querySelector(".page-heading .btn-primary") && !!document.querySelector(".permission-note") && !document.querySelector(".members-table-row .select")',
+);
+await nav("/demo/room/brand-direction");
+await wait('!!document.querySelector("canvas")');
+await assert(
+  "canvas stays editable after reload as owner",
+  '!document.querySelector(".canvas-banner.readonly")',
+);
+await evaluate(
+  'document.querySelector(".demo-role-switch .dropdown-trigger").click()',
+);
+await evaluate(
+  `[...document.querySelectorAll(".demo-role-switch [role=menuitem]")].find(b=>b.innerText.includes("Viewer")).click()`,
+);
+await assert(
+  "viewer canvas is read-only",
+  '!!document.querySelector(".canvas-banner.readonly") && !document.querySelector("[aria-label=\'Pen (P)\']")',
+);
+await evaluate(
+  'document.querySelector(".demo-role-switch .dropdown-trigger").click()',
+);
+await evaluate(
+  `[...document.querySelectorAll(".demo-role-switch [role=menuitem]")].find(b=>b.innerText.includes("Owner")).click()`,
+);
 await click("Settings");
 await wait('!!document.querySelector(".settings-layout")');
-await click("Appearance");
+await click("Preferences");
+await wait(
+  `[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="Dark")`,
+);
 await click("Dark");
 await assert(
   "theme setting affects root",

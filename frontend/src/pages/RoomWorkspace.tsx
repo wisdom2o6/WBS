@@ -9,6 +9,7 @@ import {
   Skeleton,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { PlannedBadge, RoleBadge } from "../components/patterns";
 import { RoomCanvas } from "./RoomCanvas";
 import { recordRecentRoom } from "../services/recentRooms";
 const Documents = lazy(() => import("./Documents"));
@@ -16,7 +17,7 @@ const Media = lazy(() => import("./Media"));
 
 export default function RoomWorkspace() {
   const { roomId } = useParams();
-  const { workspace, base, members, demo } = useWorkspace();
+  const { workspace, base, members, demo, role } = useWorkspace();
   const { pathname } = useLocation();
   const project = workspace?.projects.find((p) =>
     p.rooms.some((r) => r.id === roomId),
@@ -26,7 +27,6 @@ export default function RoomWorkspace() {
     if (room?.id && workspace?.id)
       recordRecentRoom(workspace.id, room.id, demo);
   }, [room?.id, workspace?.id, demo]);
-  
   const active = pathname.endsWith("/chat")
     ? "chat"
     : pathname.endsWith("/documents")
@@ -63,6 +63,7 @@ export default function RoomWorkspace() {
         </div>
         <div className="room-context-members">
           <Avatars names={members.map((m) => m.fullName)} />
+          <RoleBadge role={role} />
           <Badge>{demo ? "Demo room" : "Live room"}</Badge>
         </div>
       </header>
@@ -81,6 +82,7 @@ export default function RoomWorkspace() {
           >
             <Icon name={t.icon} size={15} />
             {t.label}
+            {t.key === "chat" && <PlannedBadge label="Beta" />}
           </Link>
         ))}
         <span>

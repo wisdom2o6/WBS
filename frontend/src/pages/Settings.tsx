@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
@@ -16,7 +16,12 @@ import {
   useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { PermissionNote, RoleBadge } from "../components/patterns";
 import { errorMessage } from "../services/workspace";
+import {
+  readCanvasPrefs,
+  writeCanvasPrefs,
+} from "../features/canvas/types";
 
 export default function Settings() {
   const { workspace } = useWorkspace();
@@ -24,8 +29,12 @@ export default function Settings() {
 }
 function SettingsForm() {
   const { user, logout } = useAuth();
-  const { workspace, update, remove, demo, base, canManage } = useWorkspace();
-  const [tab, setTab] = useState("Account");
+  const { workspace, update, remove, demo, base, can, role } = useWorkspace();
+  const canManage = can.manageWorkspace;
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") || "Profile";
+  const setTab = (t: string) => setParams(t === "Profile" ? {} : { tab: t });
+  const [canvasPrefs, setCanvasPrefs] = useState(readCanvasPrefs);
   const [name, setName] = useState(workspace?.name || "");
   const [description, setDescription] = useState(workspace?.description || "");
   const [fullName, setFullName] = useState(
@@ -51,17 +60,19 @@ function SettingsForm() {
       </div>
       <div className="settings-layout">
         <nav className="settings-nav">
-          {["Account", "Workspace", "Security", "Appearance"].map((t) => (
+          <span className="eyebrow settings-nav-label">ACCOUNT</span>
+          {["Profile", "Preferences", "Security", "Workspace"].map((t) => (
             <Button
               key={t}
               variant="ghost"
-              className={tab === t ? "active" : ""}
+              className={`${tab === t ? "active" : ""} ${t === "Workspace" ? "settings-nav-workspace" : ""}`}
+              aria-current={tab === t ? "page" : undefined}
               icon={
                 {
-                  Account: "users",
+                  Profile: "users",
                   Workspace: "folder",
                   Security: "shield",
-                  Appearance: "sun",
+                  Preferences: "sun",
                 }[t]
               }
               onClick={() => setTab(t)}
@@ -71,7 +82,7 @@ function SettingsForm() {
           ))}
         </nav>
         <div className="settings-content">
-          {tab === "Account" && (
+          {tab === "Profile" && (
             <>
               <Heading>Personal information</Heading>
               <p className="muted">The details that make this space yours.</p>
@@ -131,6 +142,22 @@ function SettingsForm() {
               <p className="muted">
                 A name and a little context for your shared space.
               </p>
+              <div className="settings-role-row">
+                <span className="workspace-avatar">
+                  {workspace?.name.slice(0, 1) || "W"}
+                </span>
+                <div>
+                  <strong>{workspace?.name || "No workspace"}</strong>
+                  <small>Your role in this workspace</small>
+                </div>
+                <RoleBadge role={role} />
+              </div>
+              {!canManage && (
+                <PermissionNote role={role}>
+                  Only workspace owners can change workspace details or delete
+                  the workspace.
+                </PermissionNote>
+              )}
               <form
                 className="form-stack"
                 onSubmit={async (e) => {
@@ -186,14 +213,18 @@ function SettingsForm() {
                     <option value="member">Member · defined by backend</option>
                   </Select>
                 </Field>
-                <Button
-                  variant="primary"
-                  type="submit"
-                  disabled={busy || !canManage || !workspace}
-                >
-                  {busy ? "Saving…" : "Save workspace"}
-                </Button>
+                {canManage && (
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    loading={busy}
+                    disabled={!workspace}
+                  >
+                    {busy ? "Saving…" : "Save workspace"}
+                  </Button>
+                )}
               </form>
+              {canManage && (
               <div className="danger-zone">
                 <Heading level={3}>Delete workspace</Heading>
                 <p>
@@ -208,6 +239,7 @@ function SettingsForm() {
                   Delete workspace
                 </Button>
               </div>
+              )}
             </>
           )}
           {tab === "Security" && (
@@ -261,7 +293,7 @@ function SettingsForm() {
               </Button>
             </>
           )}
-          {tab === "Appearance" && (
+          {tab === "Preferences" && (
             <>
               <Heading>Make it feel like home</Heading>
               <p className="muted">
@@ -307,6 +339,37 @@ function SettingsForm() {
                 Appearance is saved on this browser. Canvas object colors remain
                 unchanged.
               </Notice>
+              <div className="settings-section">
+                <Heading level={3}>Canvas defaults</Heading>
+                <p className="muted small-text">
+                  Applied when you open a room canvas on this browser.
+                </p>
+                {(
+                  [
+                    ["grid", "Show grid", "Display the dot grid behind objects."],
+                    ["snap", "Snap to grid", "Align objects to the grid while moving and drawing."],
+                    ["layers", "Open layers panel", "Show the layers panel on wide screens."],
+                  ] as const
+                ).map(([key, label, hint]) => (
+                  <label className="settings-toggle" key={key}>
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{hint}</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      className="switch"
+                      checked={canvasPrefs[key]}
+                      onChange={(e) => {
+                        writeCanvasPrefs({ [key]: e.target.checked });
+                        setCanvasPrefs(readCanvasPrefs());
+                        toast("Canvas preference saved.");
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
             </>
           )}
         </div>
@@ -314,6 +377,8 @@ function SettingsForm() {
       {deleting && (
         <Confirm
           title={`Delete ${workspace?.name}?`}
+          confirmLabel="Delete workspace"
+          requireText={workspace?.name}
           description="All projects, rooms and canvas data in this workspace will be removed. This cannot be undone."
           onClose={() => setDeleting(false)}
           onConfirm={async () => {

@@ -4,15 +4,22 @@ import { useAuth } from "../../context/AuthContext";
 import {
   Avatar,
   Button,
+  Confirm,
   DownloadLink,
   EmptyState,
   IconButton,
   Input,
-  Notice,
+  Spinner,
   Textarea,
   useToast,
 } from "../../components/ui";
 import { Icon } from "../../components/Icon";
+import {
+  PlannedBadge,
+  SecurityStatus,
+  StatusIndicator,
+  connectionSecurity,
+} from "../../components/patterns";
 
 export interface ChatMessage {
   id?: string;
@@ -21,80 +28,142 @@ export interface ChatMessage {
   timestamp: string;
   replyTo?: string;
   pinned?: boolean;
-  reactions?: string[];
+  edited?: boolean;
+  reactions?: { icon: string; users: string[] }[];
   attachment?: { name: string; url: string; type: string };
+  /** Local delivery state; absent once the server echo arrives. */
+  status?: "sending" | "failed";
+  /** System notices such as "Sarah created this room". */
+  system?: boolean;
+  /** Render the "New messages" divider before this message. */
+  unreadBoundary?: boolean;
 }
+const REACTIONS = [
+  { icon: "heart", label: "Love" },
+  { icon: "check", label: "Agree" },
+  { icon: "star", label: "Important" },
+];
+const API_ENDPOINT = "http://localhost:8080";
+const now = () =>
+  new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
+/** Live replies are encoded as "↳ user: quote\n body" in the existing payload. */
+function parseReply(m: ChatMessage) {
+  if (m.replyTo || !m.message.startsWith("↳ ") || !m.message.includes("\n"))
+    return { reply: m.replyTo, body: m.message };
+  const [first, ...rest] = m.message.split("\n");
+  return { reply: first.slice(2), body: rest.join("\n") };
+}
+
 export function ChatPanel({
   messages,
   setMessages,
   connected,
+  connection,
   onSend,
 }: {
   messages: ChatMessage[];
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   connected: boolean;
-  onSend: (message: string) => void;
+  connection: "connecting" | "connected" | "reconnecting" | "failed";
+  onSend: (message: string) => boolean | Promise<boolean>;
 }) {
-  const { demo, members } = useWorkspace();
+  const { demo, members, can } = useWorkspace();
   const { user } = useAuth();
   const username = demo ? "alex" : user?.username;
+  const canPost = can.edit;
   const [query, setQuery] = useState("");
   const [text, setText] = useState("");
   const [reply, setReply] = useState<ChatMessage | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [reacting, setReacting] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState<number | null>(null);
   const [showPins, setShowPins] = useState(false);
   const [mention, setMention] = useState(false);
   const [attachment, setAttachment] = useState<ChatMessage["attachment"]>();
-  const [security, setSecurity] = useState(false);
   const file = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const toast = useToast();
+  const live = demo || connected;
+  const security = connectionSecurity(API_ENDPOINT);
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [messages.length]);
-  const send = () => {
-    if (!text.trim() && !attachment) return;
+  const nameFor = (u: string) =>
+    members.find((p) => p.username === u)?.fullName || u || "Member";
+  const update = (index: number, patch: Partial<ChatMessage>) =>
+    setMessages((prev) =>
+      prev.map((m, i) => (i === index ? { ...m, ...patch } : m)),
+    );
+  const deliver = async (index: number, body: string) => {
     if (demo) {
-      if (editing !== null)
-        setMessages((prev) =>
-          prev.map((m, i) => (i === editing ? { ...m, message: text } : m)),
-        );
-      else
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            senderUsername: "alex",
-            message: text,
-            timestamp: new Date().toLocaleTimeString("en", {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-            replyTo: reply?.message,
-            attachment,
-          },
-        ]);
-    } else {
-      if (!connected) {
-        toast("Chat is disconnected. Your draft has not been sent.", true);
-        return;
-      }
-      onSend(
-        reply ? `↳ ${reply.senderUsername}: ${reply.message}\n${text}` : text,
-      );
+      setTimeout(() => update(index, { status: undefined }), 450);
+      return;
     }
+    if (!(await onSend(body))) update(index, { status: "failed" });
+  };
+  const send = () => {
+    if ((!text.trim() && !attachment) || !canPost) return;
+    if (editing !== null) {
+      update(editing, { message: text, edited: true });
+      setEditing(null);
+      setText("");
+      return;
+    }
+    if (!demo && !connected) {
+      toast("Chat is disconnected. Your draft has not been sent.", true);
+      return;
+    }
+    const body = demo
+      ? text
+      : reply
+        ? `↳ ${reply.senderUsername}: ${parseReply(reply).body}\n${text}`
+        : text;
+    const index = messages.length;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        senderUsername: username || "you",
+        message: body,
+        timestamp: now(),
+        replyTo: demo && reply ? parseReply(reply).body : undefined,
+        attachment,
+        status: "sending",
+      },
+    ]);
+    void deliver(index, body);
     setText("");
     setReply(null);
-    setEditing(null);
     setAttachment(undefined);
   };
+  const toggleReaction = (index: number, icon: string) =>
+    setMessages((prev) =>
+      prev.map((msg, i) => {
+        if (i !== index) return msg;
+        const me = username || "alex";
+        const list = msg.reactions ? [...msg.reactions] : [];
+        const r = list.find((x) => x.icon === icon);
+        if (!r) list.push({ icon, users: [me] });
+        else if (r.users.includes(me))
+          r.users = r.users.filter((u) => u !== me);
+        else r.users = [...r.users, me];
+        return {
+          ...msg,
+          reactions: list
+            .map((x) => ({ ...x }))
+            .filter((x) => x.users.length),
+        };
+      }),
+    );
   const filtered = messages
     .map((m, index) => ({ ...m, index }))
     .filter(
       (m) =>
-        m.message.toLowerCase().includes(query.toLowerCase()) &&
+        (!query || (!m.system && m.message.toLowerCase().includes(query.toLowerCase()))) &&
         (!showPins || m.pinned),
     );
+  const onlineSample = demo ? ["sarah", "mia"] : [];
   return (
     <div className="chat-workspace">
       <aside className="chat-sidebar">
@@ -105,7 +174,10 @@ export function ChatPanel({
           icon="chat"
           onClick={() => setShowPins(false)}
         >
-          Team conversation<span className="tab-count">{messages.length}</span>
+          Team conversation
+          <span className="tab-count">
+            {messages.filter((m) => !m.system).length}
+          </span>
         </Button>
         <Button
           variant="ghost"
@@ -116,29 +188,38 @@ export function ChatPanel({
           Pinned messages
         </Button>
         <div className="chat-sidebar-members">
-          <span className="eyebrow">WORKSPACE MEMBERS</span>
+          <span className="eyebrow">
+            MEMBERS{demo ? " · SAMPLE PRESENCE" : ""}
+          </span>
           {members.map((m, i) => (
             <div key={m.userId}>
-              <Avatar name={m.fullName} tone={i} size="small" />
+              <span className="chat-member-avatar">
+                <Avatar name={m.fullName} tone={i} size="small" />
+                {onlineSample.includes(m.username) && <i title="Active" />}
+              </span>
               <span>{m.fullName}</span>
+              {m.username === username && <small>you</small>}
             </div>
           ))}
         </div>
-        <div className="chat-security">
-          <Icon name="shield" size={18} />
-          <strong>Security, without assumptions.</strong>
-          <p>End-to-end encryption is enabled for room messages.</p>
-          <Button variant="ghost" onClick={() => setSecurity(!security)}>
-            {security ? "Hide details" : "Learn more"}
-            <Icon name="chevron" size={12} />
-          </Button>
-          {security && (
-            <p>
-              {demo
-                ? "Demo messages never leave this session."
-                : "Room messages are encrypted in the browser with AES-256-GCM before being sent. Legacy plaintext messages remain readable when encountered."}
-            </p>
-          )}
+        <div className="chat-security-stack">
+          <span className="eyebrow">CONNECTION SECURITY</span>
+          <SecurityStatus state={security} />
+          <SecurityStatus state="e2ee" e2eeVerified={!demo} />
+        </div>
+        <div className="chat-module-status">
+          <div>
+            <strong>Chat</strong>
+            <PlannedBadge label="Beta" />
+          </div>
+          <p>
+            <Icon name="check" size={12} />
+            Encrypted live send, receive and 50-message history
+          </p>
+          <p className="planned">
+            <Icon name="clock" size={12} />
+            Edits, reactions, pins, files and typing status are planned
+          </p>
         </div>
       </aside>
       <section className="chat-main">
@@ -148,13 +229,32 @@ export function ChatPanel({
               {showPins ? "Pinned messages" : "Team conversation"}
             </strong>
             <span>
-              {demo
-                ? "Local demo chat"
-                : connected
-                  ? "Connected · live delivery"
-                  : "Disconnected · messages not sent"}
+              {demo ? (
+                <StatusIndicator state="local" label="Sample conversation" compact />
+              ) : (
+                <StatusIndicator
+                  compact
+                  state={
+                    connection === "connected"
+                      ? "connected"
+                      : connection === "failed"
+                        ? "failed"
+                        : connection === "connecting"
+                          ? "connecting"
+                          : "reconnecting"
+                  }
+                  label={
+                    connection === "connected"
+                      ? "Connected · live delivery"
+                      : connection === "failed"
+                        ? "Connection rejected"
+                        : undefined
+                  }
+                />
+              )}
             </span>
           </div>
+          <SecurityStatus state={security} compact />
           <div className="search-input">
             <Icon name="search" size={15} />
             <Input
@@ -165,159 +265,236 @@ export function ChatPanel({
             />
           </div>
         </div>
+        {!demo && connection === "reconnecting" && (
+          <div className="chat-banner warning" role="status">
+            <Spinner size={12} />
+            Connection lost. Reconnecting… Messages you send now will fail.
+          </div>
+        )}
+        {!demo && connection === "failed" && (
+          <div className="chat-banner error" role="alert">
+            <Icon name="wifi-off" size={14} />
+            The room connection was rejected. Messages can’t be delivered.
+          </div>
+        )}
         <div className="chat-timeline">
           <div className="chat-date-separator">
             <span>
               {demo ? "SAMPLE CONVERSATION · TODAY" : "CURRENT SESSION"}
             </span>
           </div>
-          <Notice>
-            {demo
-              ? "Sample conversation. Sending, replies, edits, pins, reactions and local attachments work only in this demo."
-              : "Messages use the STOMP room channel and load the latest 50 messages from server history. Editing, deletion, reactions, pins, attachments and typing broadcasts are not supported."}
-          </Notice>
-          {filtered.map((m, i) => (
-            <div className="chat-message" key={m.id || m.index}>
-              <Avatar
-                name={
-                  members.find((p) => p.username === m.senderUsername)
-                    ?.fullName ||
-                  m.senderUsername ||
-                  "Member"
-                }
-                tone={i}
-              />
-              <div className="message-content">
-                <div className="message-author">
-                  <strong>
-                    {members.find((p) => p.username === m.senderUsername)
-                      ?.fullName ||
-                      m.senderUsername ||
-                      "Member"}
-                  </strong>
-                  {m.senderUsername === username && <span>you</span>}
+          {!demo && (
+            <div className="chat-module-note">
+              <Icon name="info" size={14} />
+              Room messages are encrypted in the browser with AES-256-GCM and
+              the latest 50 messages load from server history.
+            </div>
+          )}
+          {filtered.map((m, i) => {
+            if (m.system)
+              return (
+                <div className="chat-system" key={m.id || m.index}>
+                  <Icon name="info" size={12} />
+                  <span>{m.message}</span>
                   <time>{m.timestamp}</time>
-                  {m.pinned && <Icon name="pin" size={12} />}
                 </div>
-                {m.replyTo && (
-                  <div className="message-reply-preview">
-                    <Icon name="reply" size={13} />
-                    {m.replyTo}
+              );
+            const prev = filtered[i - 1];
+            const grouped =
+              !!prev &&
+              !prev.system &&
+              prev.senderUsername === m.senderUsername &&
+              !m.unreadBoundary &&
+              !query &&
+              !showPins;
+            const own = m.senderUsername === username;
+            const { reply: replyText, body } = parseReply(m);
+            const isImage = m.attachment?.type.startsWith("image/");
+            return (
+              <div key={m.id || m.index}>
+                {m.unreadBoundary && !query && !showPins && (
+                  <div className="chat-unread-divider">
+                    <span>NEW MESSAGES</span>
                   </div>
                 )}
-                <p>{m.message}</p>
-                {m.attachment && (
-                  <DownloadLink
-                    className="message-attachment"
-                    href={m.attachment.url}
-                    download={m.attachment.name}
-                  >
-                    <Icon name="paperclip" size={15} />
-                    {m.attachment.name}
-                    <Icon name="download" size={14} />
-                  </DownloadLink>
-                )}
-                {m.reactions?.length ? (
-                  <Button
-                    variant="ghost"
-                    className="reaction"
-                    icon="heart"
-                    onClick={() =>
-                      setMessages((prev) =>
-                        prev.map((msg, index) =>
-                          index === m.index
-                            ? {
-                                ...msg,
-                                reactions: msg.reactions?.includes(
-                                  username || "alex",
-                                )
-                                  ? msg.reactions.filter(
-                                      (n) => n !== (username || "alex"),
-                                    )
-                                  : [
-                                      ...(msg.reactions || []),
-                                      username || "alex",
-                                    ],
-                              }
-                            : msg,
-                        ),
-                      )
-                    }
-                  >
-                    {m.reactions.length}
-                  </Button>
-                ) : null}
+                <div
+                  className={`chat-message ${grouped ? "grouped" : ""} ${selected === m.index ? "selected" : ""} ${m.status ? `status-${m.status}` : ""} ${own ? "own" : ""}`}
+                  tabIndex={0}
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest("button,a")) return;
+                    setSelected(selected === m.index ? null : m.index);
+                  }}
+                >
+                  {grouped ? (
+                    <span className="message-gutter">
+                      <time>{m.timestamp}</time>
+                    </span>
+                  ) : (
+                    <Avatar name={nameFor(m.senderUsername)} tone={i} />
+                  )}
+                  <div className="message-content">
+                    {!grouped && (
+                      <div className="message-author">
+                        <strong>{nameFor(m.senderUsername)}</strong>
+                        {own && <span>you</span>}
+                        <time>{m.timestamp}</time>
+                        {m.pinned && <Icon name="pin" size={12} />}
+                      </div>
+                    )}
+                    {replyText && (
+                      <div className="message-reply-preview">
+                        <Icon name="reply" size={13} />
+                        {replyText}
+                      </div>
+                    )}
+                    <p>
+                      {body}
+                      {m.edited && <em className="message-edited">(edited)</em>}
+                    </p>
+                    {m.attachment &&
+                      (isImage ? (
+                        <a
+                          className="message-image"
+                          href={m.attachment.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <img src={m.attachment.url} alt={m.attachment.name} />
+                          <span>
+                            <Icon name="image" size={12} />
+                            {m.attachment.name}
+                          </span>
+                        </a>
+                      ) : (
+                        <DownloadLink
+                          className="message-attachment"
+                          href={m.attachment.url}
+                          download={m.attachment.name}
+                        >
+                          <Icon name="paperclip" size={15} />
+                          {m.attachment.name}
+                          <Icon name="download" size={14} />
+                        </DownloadLink>
+                      ))}
+                    {m.reactions?.length ? (
+                      <div className="message-reactions">
+                        {m.reactions.map((r) => (
+                          <button
+                            type="button"
+                            key={r.icon}
+                            className={`reaction ${r.users.includes(username || "alex") ? "mine" : ""}`}
+                            aria-label={`${REACTIONS.find((x) => x.icon === r.icon)?.label || "Reaction"}, ${r.users.length}`}
+                            disabled={!demo}
+                            onClick={() => toggleReaction(m.index, r.icon)}
+                          >
+                            <Icon name={r.icon} size={12} />
+                            {r.users.length}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {m.status === "sending" && (
+                      <span className="message-status">
+                        <Spinner size={9} />
+                        Sending…
+                      </span>
+                    )}
+                    {m.status === "failed" && (
+                      <span className="message-status failed">
+                        <Icon name="alert" size={12} />
+                        Not sent.
+                        <button
+                          type="button"
+                          onClick={() => {
+                            update(m.index, { status: "sending" });
+                            void deliver(m.index, m.message);
+                          }}
+                        >
+                          Retry
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMessages((list) =>
+                              list.filter((_, idx) => idx !== m.index),
+                            )
+                          }
+                        >
+                          Discard
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  {!m.status && (
+                    <div className="message-actions">
+                      {canPost && (
+                        <IconButton
+                          icon="reply"
+                          label="Reply to message"
+                          onClick={() => setReply(m)}
+                        />
+                      )}
+                      <div className="reaction-picker-wrap">
+                        <IconButton
+                          icon="heart"
+                          label={
+                            demo
+                              ? "React to message"
+                              : "Reactions require backend support"
+                          }
+                          disabled={!demo || !canPost}
+                          onClick={() =>
+                            setReacting(reacting === m.index ? null : m.index)
+                          }
+                        />
+                        {reacting === m.index && (
+                          <div className="reaction-picker" role="menu">
+                            {REACTIONS.map((r) => (
+                              <IconButton
+                                key={r.icon}
+                                icon={r.icon}
+                                label={r.label}
+                                onClick={() => {
+                                  toggleReaction(m.index, r.icon);
+                                  setReacting(null);
+                                }}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <IconButton
+                        icon="pin"
+                        label="Pin message (demo only)"
+                        disabled={!demo || !canPost}
+                        onClick={() => update(m.index, { pinned: !m.pinned })}
+                      />
+                      {own && (
+                        <>
+                          <IconButton
+                            icon="edit"
+                            label="Edit message (demo only)"
+                            disabled={!demo}
+                            onClick={() => {
+                              setEditing(m.index);
+                              setText(m.message);
+                            }}
+                          />
+                          <IconButton
+                            icon="trash"
+                            label="Delete message (demo only)"
+                            disabled={!demo}
+                            onClick={() => setDeleting(m.index)}
+                          />
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="message-actions">
-                <IconButton
-                  icon="reply"
-                  label="Reply to message"
-                  onClick={() => setReply(m)}
-                />
-                <IconButton
-                  icon="heart"
-                  label={
-                    demo
-                      ? "React to message"
-                      : "Reactions require backend support"
-                  }
-                  disabled={!demo}
-                  onClick={() =>
-                    setMessages((prev) =>
-                      prev.map((msg, index) =>
-                        index === m.index
-                          ? {
-                              ...msg,
-                              reactions: msg.reactions?.includes("alex")
-                                ? msg.reactions.filter((n) => n !== "alex")
-                                : [...(msg.reactions || []), "alex"],
-                            }
-                          : msg,
-                      ),
-                    )
-                  }
-                />
-                <IconButton
-                  icon="pin"
-                  label="Pin message (demo only)"
-                  disabled={!demo}
-                  onClick={() =>
-                    setMessages((prev) =>
-                      prev.map((msg, index) =>
-                        index === m.index
-                          ? { ...msg, pinned: !msg.pinned }
-                          : msg,
-                      ),
-                    )
-                  }
-                />
-                {m.senderUsername === username && (
-                  <>
-                    <IconButton
-                      icon="edit"
-                      label="Edit message (demo only)"
-                      disabled={!demo}
-                      onClick={() => {
-                        setEditing(m.index);
-                        setText(m.message);
-                      }}
-                    />
-                    <IconButton
-                      icon="trash"
-                      label="Delete message (demo only)"
-                      disabled={!demo}
-                      onClick={() =>
-                        setMessages((prev) =>
-                          prev.filter((_, index) => index !== m.index),
-                        )
-                      }
-                    />
-                  </>
-                )}
-              </div>
-            </div>
-          ))}
-          {!filtered.length && (
+            );
+          })}
+          {!filtered.some((m) => !m.system) && (
             <EmptyState
               icon="chat"
               title={
@@ -330,147 +507,189 @@ export function ChatPanel({
               description={
                 showPins
                   ? "Keep important messages within easy reach."
-                  : "Good ideas often begin with a simple hello."
+                  : query
+                    ? "Only messages loaded in this session are searchable."
+                    : "Good ideas often begin with a simple hello."
               }
             />
           )}
           <div ref={bottom} />
         </div>
         <div className="chat-composer-area">
-          {reply && (
-            <div className="composer-context">
-              <Icon name="reply" size={14} />
-              <span>
-                Replying to {reply.senderUsername}: {reply.message.slice(0, 80)}
-              </span>
-              <IconButton
-                icon="close"
-                label="Cancel reply"
-                onClick={() => setReply(null)}
-              />
+          {!canPost ? (
+            <div className="composer-readonly">
+              <Icon name="eye" size={14} />
+              You have view-only access to this conversation.
             </div>
-          )}
-          {editing !== null && (
-            <div className="composer-context">
-              <span>Editing a local demo message</span>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setEditing(null);
-                  setText("");
-                }}
-              >
-                Cancel
-              </Button>
-            </div>
-          )}
-          {attachment && (
-            <div className="composer-context">
-              <Icon name="paperclip" size={14} />
-              <span>{attachment.name} · local attachment</span>
-              <IconButton
-                icon="close"
-                label="Remove attachment"
-                onClick={() => {
-                  URL.revokeObjectURL(attachment.url);
-                  setAttachment(undefined);
-                }}
-              />
-            </div>
-          )}
-          <div className="chat-composer">
-            <Textarea
-              aria-label="Message"
-              placeholder={
-                demo ? "Message your team… (local demo)" : "Message this room…"
-              }
-              rows={2}
-              value={text}
-              onChange={(e) => {
-                setText(e.target.value);
-                setMention(e.target.value.endsWith("@"));
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            <div className="composer-tools">
-              <IconButton
-                icon="paperclip"
-                label="Attach local file (demo only)"
-                disabled={!demo}
-                onClick={() => file.current?.click()}
-              />
-              <Button
-                variant="ghost"
-                onClick={() => setMention(!mention)}
-                aria-label="Mention a member"
-              >
-                @
-              </Button>
-              <span>Enter to send · Shift + Enter for a new line</span>
-              <Button
-                variant="primary"
-                icon="send"
-                disabled={
-                  (!demo && !connected) || (!text.trim() && !attachment)
-                }
-                onClick={send}
-              >
-                {editing !== null ? "Save edit" : "Send"}
-              </Button>
-            </div>
-          </div>
-          {mention && (
-            <div className="mention-menu">
-              {members.map((m) => (
-                <Button
-                  variant="ghost"
-                  key={m.userId}
-                  onClick={() => {
-                    setText(
-                      (prev) =>
-                        `${prev.endsWith("@") ? prev.slice(0, -1) : prev} @${m.username} `,
-                    );
-                    setMention(false);
+          ) : (
+            <>
+              {reply && (
+                <div className="composer-context reply">
+                  <Icon name="reply" size={14} />
+                  <span>
+                    Replying to <strong>{nameFor(reply.senderUsername)}</strong>
+                    <small>{parseReply(reply).body.slice(0, 90)}</small>
+                  </span>
+                  <IconButton
+                    icon="close"
+                    label="Cancel reply"
+                    onClick={() => setReply(null)}
+                  />
+                </div>
+              )}
+              {editing !== null && (
+                <div className="composer-context">
+                  <Icon name="edit" size={14} />
+                  <span>Editing message · local demo</span>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setEditing(null);
+                      setText("");
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              )}
+              {attachment && (
+                <div className="composer-attachment">
+                  {attachment.type.startsWith("image/") ? (
+                    <img src={attachment.url} alt="" />
+                  ) : (
+                    <span className="composer-file-icon">
+                      <Icon name="file" size={18} />
+                    </span>
+                  )}
+                  <span>
+                    <strong>{attachment.name}</strong>
+                    <small>Local attachment · not uploaded</small>
+                  </span>
+                  <IconButton
+                    icon="close"
+                    label="Remove attachment"
+                    onClick={() => {
+                      URL.revokeObjectURL(attachment.url);
+                      setAttachment(undefined);
+                    }}
+                  />
+                </div>
+              )}
+              <div className={`chat-composer ${!live ? "disabled" : ""}`}>
+                <Textarea
+                  aria-label="Message"
+                  placeholder={
+                    !live
+                      ? "Reconnect to send messages…"
+                      : demo
+                        ? "Message your team… (local demo)"
+                        : "Message this room…"
+                  }
+                  rows={2}
+                  value={text}
+                  onChange={(e) => {
+                    setText(e.target.value);
+                    setMention(e.target.value.endsWith("@"));
                   }}
-                >
-                  {m.fullName}
-                  <small>@{m.username}</small>
-                </Button>
-              ))}
-            </div>
-          )}
-          <Input
-            className="sr-only"
-            type="file"
-            ref={file}
-            onChange={(e) => {
-              const chosen = e.target.files?.[0];
-              if (chosen) {
-                if (chosen.size > 20 * 1024 * 1024) {
-                  toast("Attachments must be smaller than 20 MB.", true);
-                  return;
-                }
-                setAttachment({
-                  name: chosen.name,
-                  type: chosen.type,
-                  url: URL.createObjectURL(chosen),
-                });
-              }
-              e.target.value = "";
-            }}
-          />
-          {text && (
-            <span className="typing-status">
-              You are writing a {demo ? "local demo message" : "draft"}…
-            </span>
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      send();
+                    }
+                    if (e.key === "Escape") {
+                      setReply(null);
+                      setMention(false);
+                    }
+                  }}
+                />
+                <div className="composer-tools">
+                  <IconButton
+                    icon="paperclip"
+                    label={
+                      demo ? "Attach local file" : "Attachments are planned"
+                    }
+                    disabled={!demo}
+                    onClick={() => file.current?.click()}
+                  />
+                  <IconButton
+                    icon="at"
+                    label="Mention a member"
+                    onClick={() => setMention(!mention)}
+                  />
+                  <span>Enter to send · Shift + Enter for a new line</span>
+                  <Button
+                    variant="primary"
+                    icon="send"
+                    disabled={!live || (!text.trim() && !attachment)}
+                    onClick={send}
+                  >
+                    {editing !== null ? "Save edit" : "Send"}
+                  </Button>
+                </div>
+              </div>
+              {mention && (
+                <div className="mention-menu">
+                  {members.map((m) => (
+                    <Button
+                      variant="ghost"
+                      key={m.userId}
+                      onClick={() => {
+                        setText(
+                          (prev) =>
+                            `${prev.endsWith("@") ? prev.slice(0, -1) : prev} @${m.username} `,
+                        );
+                        setMention(false);
+                      }}
+                    >
+                      {m.fullName}
+                      <small>@{m.username}</small>
+                    </Button>
+                  ))}
+                </div>
+              )}
+              <Input
+                className="sr-only"
+                type="file"
+                ref={file}
+                tabIndex={-1}
+                onChange={(e) => {
+                  const chosen = e.target.files?.[0];
+                  if (chosen) {
+                    if (chosen.size > 20 * 1024 * 1024) {
+                      toast("Attachments must be smaller than 20 MB.", true);
+                      return;
+                    }
+                    setAttachment({
+                      name: chosen.name,
+                      type: chosen.type,
+                      url: URL.createObjectURL(chosen),
+                    });
+                  }
+                  e.target.value = "";
+                }}
+              />
+              {text && (
+                <span className="typing-status">
+                  You are writing a {demo ? "local demo message" : "draft"}…
+                </span>
+              )}
+            </>
           )}
         </div>
       </section>
+      {deleting !== null && (
+        <Confirm
+          title="Delete this message?"
+          description="The message will be removed from this demo conversation."
+          confirmLabel="Delete message"
+          onClose={() => setDeleting(null)}
+          onConfirm={() => {
+            setMessages((prev) => prev.filter((_, i) => i !== deleting));
+            setDeleting(null);
+            setSelected(null);
+          }}
+        />
+      )}
     </div>
   );
 }

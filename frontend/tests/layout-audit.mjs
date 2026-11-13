@@ -35,7 +35,7 @@ const ev = async (expression) =>
 await send("Runtime.enable");
 await send("Page.enable");
 const failures = [];
-for (const width of [1920, 1024, 768, 390]) {
+for (const width of [1440, 1280, 1024, 768, 375]) {
   await send("Emulation.setDeviceMetricsOverride", {
     width,
     height: 1000,
@@ -54,6 +54,8 @@ for (const width of [1920, 1024, 768, 390]) {
     "/demo/tasks",
     "/demo/notifications",
     "/demo/settings",
+    "/demo/rooms",
+    "/demo/system",
   ]) {
     await send("Page.navigate", { url: appUrl + path });
     for (let n = 0; n < 60; n++) {

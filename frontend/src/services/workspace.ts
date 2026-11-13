@@ -40,12 +40,14 @@ export const workspaceService = {
     api.delete(`/${kind}s/${id}`),
   addMember: async (id: string, usernameOrEmail: string) =>
     api.post(`/workspaces/${id}/members`, { usernameOrEmail }),
-  upload: async (file: File) => {
+  upload: async (file: File, onProgress?: (fraction: number) => void) => {
     const form = new FormData();
     form.append("file", file);
     return (
       await api.post<{ url: string }>("/upload", form, {
         headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: (e) =>
+          onProgress?.(e.total ? e.loaded / e.total : 0),
       })
     ).data;
   },

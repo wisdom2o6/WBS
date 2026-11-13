@@ -19,6 +19,8 @@ import {
   demoWorkspaces,
 } from "../data/demo";
 import { errorMessage, workspaceService } from "../services/workspace";
+import { permissionsFor } from "../services/permissions";
+import type { Permissions, Role } from "../services/permissions";
 import type {
   Activity,
   Asset,
@@ -52,7 +54,7 @@ interface WorkspaceState {
     description?: string,
   ) => Promise<void>;
   remove: (kind: "workspace" | "project" | "room", id: string) => Promise<void>;
-  addMember: (email: string) => Promise<void>;
+  addMember: (email: string, role?: Role) => Promise<void>;
   setMembers: React.Dispatch<React.SetStateAction<Member[]>>;
   documents: Document[];
   setDocuments: React.Dispatch<React.SetStateAction<Document[]>>;
@@ -69,7 +71,14 @@ interface WorkspaceState {
     path: string,
     icon?: string,
   ) => void;
+  /** Kept for compatibility: equals can.manageMembers. */
   canManage: boolean;
+  /** Effective role of the current user in the selected workspace. */
+  role: Role;
+  can: Permissions;
+  /** Demo only: preview the interface as another role. */
+  setPreviewRole: (role: Role) => void;
+  updateProjectDescription: (id: string, description: string) => void;
 }
 const Context = createContext<WorkspaceState | undefined>(undefined);
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
@@ -81,6 +90,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     demo ? structuredClone(demoWorkspaces) : [],
   );
   const [selectedId, setSelectedId] = useState("");
+  const [previewRole, setPreviewRole] = useState<Role>("OWNER");
   const [liveMembers, setLiveMembers] = useState<{
     workspaceId?: string;
     items: Member[];
@@ -308,11 +318,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
                 ...w,
                 projects: w.projects.map((p) =>
                   kind === "project" && p.id === id
-                    ? { ...p, name }
+                    ? { ...p, name, description: description ?? p.description }
                     : {
                         ...p,
                         rooms: p.rooms.map((r) =>
-                          kind === "room" && r.id === id ? { ...r, name } : r,
+                          kind === "room" && r.id === id
+                            ? {
+                                ...r,
+                                name,
+                                description: description ?? r.description,
+                              }
+                            : r,
                         ),
                       },
                 ),
@@ -341,7 +357,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       );
     toast(`${kind} deleted.`);
   };
-  const addMember = async (email: string) => {
+  const addMember = async (email: string, role: Role = "MEMBER") => {
     if (!workspace) throw new Error("Select a workspace first.");
     if (demo)
       setMembers((prev) => [
@@ -349,9 +365,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         {
           userId: crypto.randomUUID(),
           username: email.split("@")[0],
-          fullName: email.split("@")[0],
+          fullName: email
+            .split("@")[0]
+            .replace(/[._-]+/g, " ")
+            .replace(/\b\w/g, (c) => c.toUpperCase()),
           email,
-          role: "EDITOR",
+          role,
+          joinedAt: new Date().toISOString(),
         },
       ]);
     else {
@@ -364,6 +384,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         : "Existing user added to workspace.",
     );
   };
+  const role: Role = demo
+    ? previewRole
+    : workspace?.currentUserRole || "MEMBER";
+  const can = permissionsFor(role);
+  const updateProjectDescription = (id: string, description: string) =>
+    setWorkspaces((prev) =>
+      prev.map((w) => ({
+        ...w,
+        projects: w.projects.map((p) =>
+          p.id === id ? { ...p, description } : p,
+        ),
+      })),
+    );
   return (
     <Context.Provider
       value={{
@@ -393,10 +426,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setNotifications,
         activity: activity.filter((a) => a.workspaceId === workspace?.id),
         logActivity,
-        canManage:
-          demo ||
-          workspace?.currentUserRole === "OWNER" ||
-          workspace?.currentUserRole === "ADMIN",
+        canManage: can.manageMembers,
+        role,
+        can,
+        setPreviewRole,
+        updateProjectDescription,
       }}
     >
       {children}

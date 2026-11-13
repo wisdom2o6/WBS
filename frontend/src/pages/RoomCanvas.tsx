@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { createPortal } from "react-dom";
 import { Client } from "@stomp/stompjs";
 import SockJS from "sockjs-client";
 import axios from "axios";
+import Konva from "konva";
 import { useAuth } from "../context/AuthContext";
 import {
   Stage,
@@ -19,58 +21,46 @@ import {
 } from "react-konva";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
-  Badge,
   Button,
   Confirm,
+  Dropdown,
   Field,
   IconButton,
   Input,
   Modal,
   Notice,
-  Textarea,
+  Spinner,
   useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
+import {
+  MenuDivider,
+  MenuItem,
+  PlannedBadge,
+  Presence,
+  RoleBadge,
+  StatusIndicator,
+} from "../components/patterns";
+import type { SyncState } from "../components/patterns";
 import { ChatPanel } from "../features/chat/ChatPanel";
 import type { ChatMessage } from "../features/chat/ChatPanel";
 import { errorMessage } from "../services/workspace";
 import { decryptMessage, encryptMessage } from "../utils/cryptoUtils";
+import type { AlignMode, Shape, Tool } from "../features/canvas/types";
+import {
+  GRID,
+  NOTE_COLORS,
+  readCanvasPrefs,
+  shapeLabel,
+  writeCanvasPrefs,
+} from "../features/canvas/types";
+import { CanvasLayers } from "../features/canvas/CanvasLayers";
+import { CanvasInspector } from "../features/canvas/CanvasInspector";
+import {
+  CanvasToolOptions,
+  CanvasToolRail,
+} from "../features/canvas/CanvasToolRail";
 
-interface Shape {
-  id: string;
-  type:
-    | "RECTANGLE"
-    | "CIRCLE"
-    | "ELLIPSE"
-    | "FREEHAND"
-    | "STICKY_NOTE"
-    | "TEXT"
-    | "ARROW"
-    | "IMAGE"
-    | "LINE";
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  radius?: number;
-  radiusX?: number;
-  radiusY?: number;
-  points?: number[];
-  text?: string;
-  imageUrl?: string;
-  color: string;
-  strokeWidth?: number;
-  name?: string;
-  kind?: "frame" | "section" | "connector";
-  hidden?: boolean;
-  locked?: boolean;
-  rotation?: number;
-  opacity?: number;
-  fill?: string;
-  order?: number;
-  fontSize?: number;
-  groupId?: string;
-}
 interface HistoryEntry {
   shapes: Shape[];
   affectedIds: Set<string>;
@@ -93,32 +83,29 @@ interface ChatApiMessage {
   timestamp?: string;
 }
 
-const decryptChatContent = async (
-  content: string,
-  roomId: string,
-): Promise<string> => {
-  try {
-    return await decryptMessage(content, roomId);
-  } catch {
-    return content;
-  }
-};
+const isUUID = (value?: string) =>
+  !!value &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 
-const isUUIDStr = (str?: string) =>
-  !!str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
-
-const toChatMessage = async (
+async function toChatMessage(
   item: ChatApiMessage,
   roomId: string,
-): Promise<ChatMessage> => {
-  // Lấy tên hợp lệ (không lấy chuỗi dạng UUID)
-  let displayName = [item.senderName, item.senderUsername]
-    .find((name) => name && !isUUIDStr(name));
-
+): Promise<ChatMessage> {
+  let content = item.content;
+  try {
+    content = await decryptMessage(item.content, roomId);
+  } catch {
+    // Legacy plaintext messages remain readable.
+  }
+  const sender =
+    [item.senderName, item.senderUsername].find((name) => name && !isUUID(name)) ||
+    "Member";
   return {
     id: item.id === undefined ? undefined : String(item.id),
-    senderUsername: displayName || "Wisdom",
-    message: await decryptChatContent(item.content, roomId),
+    senderUsername: sender,
+    message: content,
     timestamp:
       item.timestamp ||
       new Date().toLocaleTimeString("en", {
@@ -126,48 +113,91 @@ const toChatMessage = async (
         minute: "2-digit",
       }),
   };
-};
+}
 
-// Component phụ render Ảnh trên Konva Canvas
-const URLImage: React.FC<{
-  shape: Shape;
-  isDraggable: boolean;
-  onDragEnd: any;
-  onClick: any;
-  onTap: () => void;
-  onMouseEnter: any;
-}> = ({ shape, isDraggable, onDragEnd, onClick, onTap, onMouseEnter }) => {
+const API = "http://localhost:8080";
+const PLEX = "IBM Plex Sans, sans-serif";
+
+// Component phụ render Ảnh trên Konva Canvas (supports stretch / contain / cover)
+const URLImage: React.FC<{ shape: Shape; common: any }> = ({
+  shape,
+  common,
+}) => {
   const [image, setImage] = useState<HTMLImageElement | undefined>(undefined);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!shape.imageUrl) return;
     const img = new window.Image();
     img.crossOrigin = "anonymous";
     img.src = shape.imageUrl;
-    img.onload = () => {
-      setImage(img);
-    };
+    img.onload = () => setImage(img);
+    img.onerror = () => setFailed(true);
   }, [shape.imageUrl]);
 
-  if (!image) return null;
-
+  const w = shape.width || 200,
+    h = shape.height || 200;
+  const base = {
+    ...common,
+    x: shape.x,
+    y: shape.y,
+    rotation: shape.rotation || 0,
+    opacity: shape.opacity ?? 1,
+  };
+  if (!image)
+    return (
+      <Group {...base}>
+        <Rect
+          width={w}
+          height={h}
+          fill="#ecebe5"
+          stroke={failed ? "#b4473f" : "#d9d8d0"}
+          dash={[6, 4]}
+        />
+        <Text
+          text={failed ? "Image unavailable" : "Loading image…"}
+          width={w}
+          y={h / 2 - 7}
+          align="center"
+          fontSize={12}
+          fontFamily={PLEX}
+          fill="#74766f"
+          listening={false}
+        />
+      </Group>
+    );
+  if (shape.fit === "contain") {
+    const r = Math.min(w / image.width, h / image.height);
+    const iw = image.width * r,
+      ih = image.height * r;
+    return (
+      <Group {...base}>
+        <Rect width={w} height={h} fill="transparent" />
+        <KonvaImage
+          image={image}
+          x={(w - iw) / 2}
+          y={(h - ih) / 2}
+          width={iw}
+          height={ih}
+          listening={false}
+        />
+      </Group>
+    );
+  }
+  let crop: { x: number; y: number; width: number; height: number } | undefined;
+  if (shape.fit === "cover") {
+    const r = Math.max(w / image.width, h / image.height);
+    const cw = w / r,
+      ch = h / r;
+    crop = {
+      x: (image.width - cw) / 2,
+      y: (image.height - ch) / 2,
+      width: cw,
+      height: ch,
+    };
+  }
   return (
-    <KonvaImage
-      key={shape.id}
-      id={shape.id}
-      image={image}
-      x={shape.x}
-      y={shape.y}
-      width={shape.width || 200}
-      height={shape.height || 200}
-      rotation={shape.rotation || 0}
-      opacity={shape.opacity ?? 1}
-      draggable={isDraggable}
-      onDragEnd={onDragEnd}
-      onClick={onClick}
-      onTap={onTap}
-      onMouseEnter={onMouseEnter}
-    />
+    <KonvaImage {...base} image={image} width={w} height={h} crop={crop} />
   );
 };
 
@@ -281,31 +311,22 @@ export const RoomCanvas: React.FC<{
 }> = ({ view = "canvas", isActive = true }) => {
   const { roomId } = useParams<{ roomId: string }>();
   const { token, user } = useAuth();
-  const { demo, assets, workspace } = useWorkspace();
+  const { demo, assets, workspace, can, role, members } = useWorkspace();
+  const readOnly = !can.edit;
   const toast = useToast();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [prefs] = useState(readCanvasPrefs);
 
   // State Pan & Zoom (Infinite Canvas)
   const [stageScale, setStageScale] = useState(1);
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
-  const [tool, setTool] = useState<
-    | "SELECT"
-    | "HAND"
-    | "FREEHAND"
-    | "RECTANGLE"
-    | "CIRCLE"
-    | "ELLIPSE"
-    | "STICKY_NOTE"
-    | "TEXT"
-    | "ARROW"
-    | "ERASER"
-    | "LINE"
-    | "FRAME"
-    | "SECTION"
-    | "CONNECTOR"
-  >("SELECT");
+  const [tool, setToolState] = useState<Tool>("SELECT");
+  const [shapeTool, setShapeTool] = useState<Tool>("RECTANGLE");
   const [color, setColor] = useState("#2455d6");
+  const [noteColor, setNoteColor] = useState(NOTE_COLORS[0].value);
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [shapes, setShapes] = useState<Shape[]>(() =>
     demo
@@ -315,12 +336,36 @@ export const RoomCanvas: React.FC<{
   const [isMouseDown, setIsMouseDown] = useState(false);
   const drawingId = useRef<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; value: string } | null>(
+    null,
+  );
+  const pendingNew = useRef<string | null>(null);
+  // Mirrors `editing` so blur + stage mousedown cannot commit twice.
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    target: string | null;
+    point: { x: number; y: number };
+  } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const readoutRef = useRef<HTMLSpanElement>(null);
 
   // Chat & File Upload State
   const [messages, setMessages] = useState<ChatMessage[]>(() =>
     demo
       ? structuredClone(
           demoMessageCache[roomId || ""] || [
+            {
+              id: "system-1",
+              senderUsername: "system",
+              system: true,
+              message: "Sarah Chen created this room",
+              timestamp: "09:30",
+            },
             {
               id: "sample-1",
               senderUsername: "sarah",
@@ -334,14 +379,34 @@ export const RoomCanvas: React.FC<{
               message:
                 "Love the restraint. The sage palette feels really considered. Let’s keep the typography doing the heavy lifting.",
               timestamp: "09:44",
-              reactions: ["sarah"],
+              reactions: [{ icon: "heart", users: ["sarah"] }],
             },
             {
               id: "sample-3",
+              senderUsername: "sarah",
+              message: "Uploaded a reference for the palette.",
+              timestamp: "09:45",
+              attachment: {
+                name: "Light and structure.jpg",
+                url: "/demo/light-and-structure.jpg",
+                type: "image/jpeg",
+              },
+            },
+            {
+              id: "sample-4",
               senderUsername: "alex",
               message:
                 "Agreed. I’ll pull together a few more references before our review.",
               timestamp: "09:46",
+            },
+            {
+              id: "sample-5",
+              senderUsername: "mia",
+              message:
+                "Joining late — could we try the wordmark at a slightly lighter weight?",
+              timestamp: "09:52",
+              unreadBoundary: true,
+              replyTo: "Love the restraint. The sage palette feels really considered.",
             },
           ],
         )
@@ -352,27 +417,32 @@ export const RoomCanvas: React.FC<{
   const stompClientRef = useRef<Client | null>(null);
   const stageRef = useRef<any>(null);
   const transformerRef = useRef<any>(null);
+  const overlayRef = useRef<any>(null);
+  const sampleCursorRef = useRef<any>(null);
 
   const [cursors, setCursors] = useState<{ [key: string]: UserCursor }>({});
   const lastCursorSend = useRef<number>(0);
   const [connected, setConnected] = useState(false);
-  const [syncStatus, setSyncStatus] = useState(
-    demo ? "Local demo" : "Connecting…",
+  const [conn, setConn] = useState<
+    "connecting" | "connected" | "reconnecting" | "failed"
+  >(demo ? "connected" : "connecting");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">(
+    "idle",
   );
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [queued, setQueued] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(!demo);
   const [canvasError, setCanvasError] = useState("");
-  const [grid, setGrid] = useState(true);
-  const [showLayers, setShowLayers] = useState(() => window.innerWidth > 1000);
+  const [grid, setGridState] = useState(prefs.grid);
+  const [snap, setSnapState] = useState(prefs.snap);
+  const [showLayers, setShowLayers] = useState(
+    () => prefs.layers && window.innerWidth > 1000,
+  );
   const [showInspector, setShowInspector] = useState(
     () => window.innerWidth > 760,
   );
   const [clearOpen, setClearOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [textDialog, setTextDialog] = useState<{
-    type: "TEXT" | "STICKY_NOTE";
-    x: number;
-    y: number;
-  } | null>(null);
-  const [textValue, setTextValue] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
   const [multiIds, setMultiIds] = useState<string[]>([]);
   const pendingEvents = useRef<
@@ -386,9 +456,32 @@ export const RoomCanvas: React.FC<{
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 800, height: 550 });
   const selected = shapes.find((s) => s.id === selectedId);
+  const selectionIds = multiIds.length
+    ? multiIds
+    : selectedId
+      ? [selectedId]
+      : [];
   const orderedShapes = shapes.toSorted(
     (a, b) => (a.order ?? shapes.indexOf(a)) - (b.order ?? shapes.indexOf(b)),
   );
+  const setTool = (t: Tool) => {
+    if (readOnly && t !== "SELECT" && t !== "HAND") return;
+    setToolState(t);
+    setSelectedId(null);
+    setMultiIds([]);
+    setHoverId(null);
+  };
+  const setGrid = (v: boolean) => {
+    setGridState(v);
+    writeCanvasPrefs({ grid: v });
+  };
+  const setSnap = (v: boolean) => {
+    setSnapState(v);
+    writeCanvasPrefs({ snap: v });
+  };
+  const setReadout = (text: string) => {
+    if (readoutRef.current) readoutRef.current.textContent = text;
+  };
   const recordHistory = () => {
     past.current = [
       ...past.current.slice(-49),
@@ -414,6 +507,12 @@ export const RoomCanvas: React.FC<{
   useEffect(() => {
     if (demo && roomId) demoMessageCache[roomId] = structuredClone(messages);
   }, [messages, roomId, demo]);
+  useEffect(
+    () => () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    },
+    [],
+  );
 
   const getUserColor = (name: string) => {
     let hash = 0;
@@ -436,38 +535,33 @@ export const RoomCanvas: React.FC<{
     if (demo || !token || !roomId) return;
 
     const client = new Client({
-      webSocketFactory: () =>
-        new SockJS("http://localhost:8080/ws-visual-workspace"),
+      webSocketFactory: () => new SockJS(`${API}/ws-visual-workspace`),
       connectHeaders: { Authorization: `Bearer ${token}` },
       reconnectDelay: 5000,
       onConnect: () => {
         setConnected(true);
-        setSyncStatus("Live connection");
+        setConn("connected");
         for (const event of pendingEvents.current.values())
           client.publish({
             destination: `/app/room.${roomId}.draw`,
             body: JSON.stringify({ roomId, ...event }),
           });
+        if (pendingEvents.current.size) setSaveState("saving");
         pendingEvents.current.clear();
+        setQueued(0);
         // 1. Subscribe nét vẽ
         client.subscribe(`/topic/room.${roomId}`, (message) => {
           const drawEvent = JSON.parse(message.body);
           if (drawEvent.payload?.id)
             editedIds.current.add(drawEvent.payload.id);
-          if (drawEvent.senderUsername === user?.username)
-            setSyncStatus("Received by server");
+          if (drawEvent.senderUsername === user?.username) {
+            setSaveState("saved");
+            if (saveTimer.current) clearTimeout(saveTimer.current);
+          }
           if (drawEvent.senderUsername !== user?.username) {
             if (drawEvent.type === "ERASER") {
               setShapes((prev) =>
                 prev.filter((s) => s.id !== drawEvent.payload.id),
-              );
-            } else if (drawEvent.type === "UPDATE") {
-              setShapes((prev) =>
-                prev.some((s) => s.id === drawEvent.payload.id)
-                  ? prev.map((s) =>
-                      s.id === drawEvent.payload.id ? drawEvent.payload : s,
-                    )
-                  : [...prev, drawEvent.payload],
               );
             } else {
               setShapes((prev) =>
@@ -510,13 +604,26 @@ export const RoomCanvas: React.FC<{
           }
         });
 
-        // 4. Subscribe Room Chat
+        // 4. Subscribe Room Chat — reconcile our own optimistic messages.
         client.subscribe(`/topic/room/${roomId}/chat`, (message) => {
           void (async () => {
             try {
-              const chatEvt = JSON.parse(message.body) as ChatApiMessage;
-              const chatMessage = await toChatMessage(chatEvt, roomId);
-              setMessages((prev) => [...prev, chatMessage]);
+              const chatMessage = await toChatMessage(
+                JSON.parse(message.body) as ChatApiMessage,
+                roomId,
+              );
+              setMessages((prev) => {
+                const index = prev.findIndex(
+                  (m) =>
+                    m.status === "sending" &&
+                    m.message === chatMessage.message,
+                );
+                if (index >= 0)
+                  return prev.map((m, i) =>
+                    i === index ? { ...chatMessage, replyTo: m.replyTo } : m,
+                  );
+                return [...prev, chatMessage];
+              });
             } catch (error) {
               setCanvasError(errorMessage(error));
             }
@@ -525,11 +632,16 @@ export const RoomCanvas: React.FC<{
       },
       onWebSocketClose: () => {
         setConnected(false);
-        setSyncStatus("Offline · local changes queued");
+        setConn((prev) => (prev === "failed" ? prev : "reconnecting"));
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.status === "sending" ? { ...m, status: "failed" } : m,
+          ),
+        );
       },
       onStompError: () => {
         setConnected(false);
-        setSyncStatus("Connection error");
+        setConn("failed");
         setCanvasError(
           "The room connection was rejected. Check your session and backend.",
         );
@@ -543,38 +655,42 @@ export const RoomCanvas: React.FC<{
     };
   }, [roomId, token, user?.username, demo]);
 
-  // Tải lịch sử chat đã mã hóa từ Database
+  // The backend keeps the latest room messages; decrypt them in the browser.
   useEffect(() => {
     if (demo || !roomId || !token) return;
-
     let active = true;
-    const fetchChatHistory = async () => {
-      try {
-        const res = await axios.get(
-          `http://localhost:8080/api/rooms/${roomId}/messages?limit=50`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        const items = Array.isArray(res.data)
-          ? res.data
-          : Array.isArray(res.data?.messages)
-            ? res.data.messages
+    axios
+      .get(`${API}/api/rooms/${roomId}/messages?limit=50`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(async (response) => {
+        const data = Array.isArray(response.data)
+          ? response.data
+          : Array.isArray(response.data?.messages)
+            ? response.data.messages
             : [];
         const history = await Promise.all(
-          (items as ChatApiMessage[]).map((item) =>
+          (data as ChatApiMessage[]).map((item) =>
             toChatMessage(item, roomId),
           ),
         );
         if (active) setMessages(history);
-      } catch (error) {
+      })
+      .catch((error) => {
         if (active) setCanvasError(errorMessage(error));
-      }
-    };
-
-    void fetchChatHistory();
+      });
     return () => {
       active = false;
     };
-  }, [roomId, token, demo]);
+  }, [demo, roomId, token]);
+  const retryConnection = async () => {
+    const client = stompClientRef.current;
+    if (!client) return;
+    setConn("connecting");
+    setCanvasError("");
+    await client.deactivate();
+    client.activate();
+  };
 
   useEffect(() => {
     if (
@@ -613,6 +729,27 @@ export const RoomCanvas: React.FC<{
     return () => clearInterval(interval);
   }, []);
 
+  // Demo only: a clearly-labelled sample collaborator cursor drifts across the board.
+  useEffect(() => {
+    if (!demo || !isActive || view !== "canvas") return;
+    const points = [
+      [560, 230],
+      [430, 420],
+      [640, 380],
+      [300, 190],
+    ];
+    let i = 0;
+    const move = () => {
+      const node = sampleCursorRef.current;
+      if (!node) return;
+      const [x, y] = points[i++ % points.length];
+      node.to({ x, y, duration: 2.6, easing: Konva.Easings.EaseInOut });
+    };
+    move();
+    const interval = setInterval(move, 3200);
+    return () => clearInterval(interval);
+  }, [demo, isActive, view]);
+
   // Tải lịch sử vẽ từ Database
   useEffect(() => {
     if (demo || !roomId || !token) return;
@@ -620,12 +757,9 @@ export const RoomCanvas: React.FC<{
     let active = true;
     const fetchCanvasHistory = async () => {
       try {
-        const res = await axios.get(
-          `http://localhost:8080/api/v1/rooms/${roomId}/canvas`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          },
-        );
+        const res = await axios.get(`${API}/api/v1/rooms/${roomId}/canvas`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (active && Array.isArray(res.data)) {
           setShapes((prev) => [
             ...res.data.filter((s: Shape) => !editedIds.current.has(s.id)),
@@ -634,6 +768,8 @@ export const RoomCanvas: React.FC<{
         }
       } catch (err) {
         if (active) setCanvasError(errorMessage(err));
+      } finally {
+        if (active) setHistoryLoading(false);
       }
     };
 
@@ -642,6 +778,18 @@ export const RoomCanvas: React.FC<{
       active = false;
     };
   }, [roomId, token, demo]);
+
+  // Insert an asset handed over from the media library.
+  const handledInsert = useRef<string | null>(null);
+  useEffect(() => {
+    const asset = (location.state as { insertAsset?: { url: string; name: string } } | null)
+      ?.insertAsset;
+    if (!asset || !isActive || handledInsert.current === location.key) return;
+    handledInsert.current = location.key;
+    if (!readOnly) insertImage(asset.url, asset.name);
+    navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key, isActive]);
 
   // Bắt phím Spacebar để Pan Canvas
   useEffect(() => {
@@ -672,6 +820,81 @@ export const RoomCanvas: React.FC<{
     };
   }, [isSpacePressed, view, isActive]);
 
+  // Context menu dismissal
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector<HTMLElement>("button")?.focus();
+    const close = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenu(null);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const items = Array.from(
+          menuRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled)") ||
+            [],
+        );
+        const index = items.indexOf(document.activeElement as HTMLElement);
+        items[
+          (index + (e.key === "ArrowDown" ? 1 : -1) + items.length) %
+            items.length
+        ]?.focus();
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", key);
+    };
+  }, [menu]);
+
+  // Viewport helpers
+  const clampScale = (s: number) => Math.max(0.1, Math.min(5, s));
+  const zoomTo = (
+    scale: number,
+    center = { x: size.width / 2, y: size.height / 2 },
+  ) => {
+    const next = clampScale(scale);
+    const point = {
+      x: (center.x - stagePos.x) / stageScale,
+      y: (center.y - stagePos.y) / stageScale,
+    };
+    setStageScale(next);
+    setStagePos({ x: center.x - point.x * next, y: center.y - point.y * next });
+  };
+  const resetView = () => {
+    setStageScale(1);
+    setStagePos({ x: 0, y: 0 });
+  };
+  const fitToScreen = (ids?: string[]) => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const nodes = (ids ?? shapes.filter((s) => !s.hidden).map((s) => s.id))
+      .map((id) => stage.findOne("#" + id))
+      .filter(Boolean);
+    if (!nodes.length) return resetView();
+    const rects = nodes.map((n: any) => n.getClientRect({ relativeTo: stage }));
+    const minX = Math.min(...rects.map((r: any) => r.x));
+    const minY = Math.min(...rects.map((r: any) => r.y));
+    const maxX = Math.max(...rects.map((r: any) => r.x + r.width));
+    const maxY = Math.max(...rects.map((r: any) => r.y + r.height));
+    const pad = 64;
+    const scale = clampScale(
+      Math.min(
+        (size.width - pad * 2) / Math.max(1, maxX - minX),
+        (size.height - pad * 2) / Math.max(1, maxY - minY),
+        2,
+      ),
+    );
+    setStageScale(scale);
+    setStagePos({
+      x: size.width / 2 - ((minX + maxX) / 2) * scale,
+      y: size.height / 2 - ((minY + maxY) / 2) * scale,
+    });
+  };
+
   // Xử lý Wheel Zoom
   const handleWheel = (e: any) => {
     e.evt.preventDefault();
@@ -688,8 +911,9 @@ export const RoomCanvas: React.FC<{
       y: (pointer.y - stage.y()) / oldScale,
     };
 
-    let newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
-    newScale = Math.max(0.1, Math.min(5, newScale));
+    const newScale = clampScale(
+      e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy,
+    );
 
     const newPos = {
       x: pointer.x - mousePointTo.x * newScale,
@@ -705,57 +929,37 @@ export const RoomCanvas: React.FC<{
       editedIds.current.add(payload.id);
       if (!replaying.current) past.current.at(-1)?.affectedIds.add(payload.id);
     }
-    if (demo) {
-      setSyncStatus("Local demo · up to date");
-      return;
-    }
+    if (demo) return;
     if (stompClientRef.current?.connected && roomId) {
-      setSyncStatus("Sending…");
+      setSaveState("saving");
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      // Without a server echo we fall back to "Live", never to "Saved".
+      saveTimer.current = setTimeout(() => setSaveState("idle"), 6000);
       stompClientRef.current.publish({
         destination: `/app/room.${roomId}.draw`,
         body: JSON.stringify({ roomId, type: eventType, payload }),
       });
     } else if (payload.id) {
       pendingEvents.current.set(payload.id, { type: eventType, payload });
-      setSyncStatus("Offline · local changes queued");
+      setQueued(pendingEvents.current.size);
     }
   };
 
-const handleSendMessage = async (text: string) => {
-    const trimmedText = text.trim();
-    if (!trimmedText || !roomId) return;
-
-    // 1. Mã hóa E2EE tin nhắn văn bản
-    const encryptedContent = await encryptMessage(trimmedText, roomId);
-
-    // 2. Tạo Payload với thông tin user từ useAuth()
-    const payload = {
-      roomId,
-      senderId: (user as any)?.id || user?.username || "",
-      senderName: user?.fullName || user?.username || "Wisdom",
-      content: encryptedContent,
-      timestamp: new Date().toISOString(),
-    };
-
-    // 3. Gửi tin nhắn qua STOMP WebSocket
-    const client = stompClientRef.current;
-    if (client && client.connected) {
-      client.publish({
-        destination: `/app/room/${roomId}/chat.send`,
-        body: JSON.stringify(payload),
-      });
-    } else if (demo) {
-      const demoMsg: ChatMessage = {
-        id: Date.now().toString(),
-        senderUsername: user?.username || "You",
-        message: trimmedText,
-        timestamp: new Date().toLocaleTimeString("en", {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      };
-      setMessages((prev) => [...prev, demoMsg]);
-    }
+  const handleSendMessage = async (message: string) => {
+    if (!message.trim() || !stompClientRef.current?.connected || !roomId)
+      return false;
+    const encrypted = await encryptMessage(message.trim(), roomId);
+    stompClientRef.current.publish({
+      destination: `/app/room/${roomId}/chat.send`,
+      body: JSON.stringify({
+        roomId,
+        senderId: user?.id || user?.userId || user?.username || "",
+        senderName: user?.fullName || user?.username || "Member",
+        content: encrypted,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+    return true;
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -772,7 +976,7 @@ const handleSendMessage = async (text: string) => {
     try {
       const res = demo
         ? { data: { url: URL.createObjectURL(file) } }
-        : await axios.post("http://localhost:8080/api/v1/upload", formData, {
+        : await axios.post(`${API}/api/v1/upload`, formData, {
             headers: {
               "Content-Type": "multipart/form-data",
               Authorization: `Bearer ${token}`,
@@ -780,36 +984,43 @@ const handleSendMessage = async (text: string) => {
           });
 
       const imageUrl = res.data.url;
-      const stage = stageRef.current;
-      const pos = getRelativePointerPosition(stage);
-
       const newId = `shape-${crypto.randomUUID()}`;
       const imgShape: Shape = {
         id: newId,
         type: "IMAGE",
-        x: pos.x || 100,
-        y: pos.y || 100,
+        x: (size.width / 2 - 125 - stagePos.x) / stageScale,
+        y: (size.height / 2 - 125 - stagePos.y) / stageScale,
         width: 250,
         height: 250,
         imageUrl: imageUrl,
+        name: file.name,
         color: "transparent",
       };
 
       recordHistory();
       setShapes((prev) => [...prev, imgShape]);
       broadcastEvent("IMAGE", imgShape);
+      setToolState("SELECT");
+      setSelectedId(newId);
       e.target.value = "";
     } catch (err) {
       toast(errorMessage(err), true);
     }
   };
 
+  const findShapeId = (node: any): string | null => {
+    let n = node;
+    while (n && n !== stageRef.current) {
+      const id = n.id?.();
+      if (id && shapes.some((s) => s.id === id)) return id;
+      n = n.getParent?.();
+    }
+    return null;
+  };
+
   const executeErase = (targetNode: any) => {
     if (!targetNode || tool !== "ERASER") return;
-    let idToDelete = targetNode.id();
-    if (!idToDelete && targetNode.getParent()) {
-      idToDelete = targetNode.getParent().id();
-    }
+    const idToDelete = findShapeId(targetNode);
     if (idToDelete) {
       if (shapes.find((s) => s.id === idToDelete)?.locked) return;
       setShapes((prev) => prev.filter((s) => s.id !== idToDelete));
@@ -817,7 +1028,44 @@ const handleSendMessage = async (text: string) => {
     }
   };
 
+  const startEditing = (s: Shape) => {
+    if (readOnly || s.locked || (s.type !== "TEXT" && s.type !== "STICKY_NOTE"))
+      return;
+    setToolState("SELECT");
+    setSelectedId(s.id);
+    setMultiIds([]);
+    setHoverId(null);
+    setEditing({ id: s.id, value: s.text || "" });
+  };
+  const commitEditing = (cancel = false) => {
+    const current = editingRef.current;
+    if (!current) return;
+    editingRef.current = null;
+    const s = shapes.find((x) => x.id === current.id);
+    const isNew = pendingNew.current === current.id;
+    pendingNew.current = null;
+    setEditing(null);
+    if (!s) return;
+    const value = cancel ? s.text || "" : current.value;
+    if (s.type === "TEXT" && !value.trim()) {
+      setShapes((prev) => prev.filter((x) => x.id !== s.id));
+      if (!isNew) broadcastEvent("ERASER", { id: s.id });
+      setSelectedId(null);
+      return;
+    }
+    if (!isNew && value === s.text) return;
+    if (!isNew) recordHistory();
+    const next = { ...s, text: value };
+    setShapes((prev) => prev.map((x) => (x.id === s.id ? next : x)));
+    broadcastEvent(isNew ? s.type : "UPDATE", next);
+  };
+
   const handleMouseDown = (e: any) => {
+    if (editingRef.current) {
+      commitEditing();
+      return;
+    }
+    if (e.evt?.button === 2) return;
     if (isSpacePressed || tool === "HAND") return;
 
     setIsMouseDown(true);
@@ -826,6 +1074,7 @@ const handleSendMessage = async (text: string) => {
       setSelectedId(null);
       setMultiIds([]);
     }
+    if (readOnly) return;
 
     if (tool === "ERASER") {
       recordHistory();
@@ -837,6 +1086,9 @@ const handleSendMessage = async (text: string) => {
     recordHistory();
 
     const pos = getRelativePointerPosition(stageRef.current);
+    const snapPos = snap
+      ? { x: Math.round(pos.x / GRID) * GRID, y: Math.round(pos.y / GRID) * GRID }
+      : pos;
     const newId = `shape-${crypto.randomUUID()}`;
     drawingId.current = newId;
 
@@ -857,18 +1109,18 @@ const handleSendMessage = async (text: string) => {
         {
           id: newId,
           type: "RECTANGLE",
-          x: pos.x,
-          y: pos.y,
+          x: snapPos.x,
+          y: snapPos.y,
           width: 0,
           height: 0,
-          color,
-          strokeWidth,
+          color: tool === "RECTANGLE" ? color : "#bcc3b0",
+          strokeWidth: tool === "RECTANGLE" ? strokeWidth : 1,
           ...(tool === "FRAME" || tool === "SECTION"
             ? {
                 kind:
                   tool === "FRAME" ? ("frame" as const) : ("section" as const),
-                fill: "#fffefb",
-                name: tool === "FRAME" ? "New frame" : "New section",
+                fill: tool === "FRAME" ? "#fffefb" : "#ecebe566",
+                name: `${tool === "FRAME" ? "Frame" : "Section"} ${shapes.filter((s) => s.kind === (tool === "FRAME" ? "frame" : "section")).length + 1}`,
               }
             : {}),
         },
@@ -879,8 +1131,8 @@ const handleSendMessage = async (text: string) => {
         {
           id: newId,
           type: "CIRCLE",
-          x: pos.x,
-          y: pos.y,
+          x: snapPos.x,
+          y: snapPos.y,
           radius: 0,
           color,
           strokeWidth,
@@ -892,8 +1144,8 @@ const handleSendMessage = async (text: string) => {
         {
           id: newId,
           type: "ELLIPSE",
-          x: pos.x,
-          y: pos.y,
+          x: snapPos.x,
+          y: snapPos.y,
           radiusX: 0,
           radiusY: 0,
           color,
@@ -906,16 +1158,30 @@ const handleSendMessage = async (text: string) => {
         {
           id: newId,
           type: tool === "LINE" ? "LINE" : "ARROW",
-          points: [pos.x, pos.y, pos.x, pos.y],
+          points: [snapPos.x, snapPos.y, snapPos.x, snapPos.y],
           color,
           strokeWidth,
           ...(tool === "CONNECTOR" ? { kind: "connector" as const } : {}),
         },
       ]);
     } else if (tool === "STICKY_NOTE" || tool === "TEXT") {
-      setTextValue("");
-      setTextDialog({ type: tool, ...pos });
+      const shape: Shape = {
+        id: newId,
+        type: tool,
+        x: snapPos.x,
+        y: snapPos.y,
+        text: "",
+        ...(tool === "STICKY_NOTE"
+          ? { width: 180, height: 160, color: noteColor, fill: noteColor }
+          : { color, fontSize: 18 }),
+      };
+      drawingId.current = null;
+      pendingNew.current = newId;
+      setShapes((prev) => [...prev, shape]);
       setIsMouseDown(false);
+      setToolState("SELECT");
+      setSelectedId(newId);
+      setEditing({ id: newId, value: "" });
     }
   };
 
@@ -937,7 +1203,7 @@ const handleSendMessage = async (text: string) => {
       }
     }
 
-    if (!isMouseDown || isSpacePressed) return;
+    if (!isMouseDown || isSpacePressed || readOnly) return;
 
     if (tool === "ERASER") {
       executeErase(e.target);
@@ -952,7 +1218,11 @@ const handleSendMessage = async (text: string) => {
     )
       return;
 
-    const pos = getRelativePointerPosition(stage);
+    const raw = getRelativePointerPosition(stage);
+    const pos =
+      snap && tool !== "FREEHAND"
+        ? { x: Math.round(raw.x / GRID) * GRID, y: Math.round(raw.y / GRID) * GRID }
+        : raw;
     const lastIndex = shapes.findIndex((s) => s.id === drawingId.current);
     if (lastIndex < 0) return;
 
@@ -968,6 +1238,7 @@ const handleSendMessage = async (text: string) => {
     ) {
       curr.width = pos.x - curr.x;
       curr.height = pos.y - curr.y;
+      setReadout(`${Math.round(Math.abs(curr.width))} × ${Math.round(Math.abs(curr.height))}`);
     } else if (
       tool === "CIRCLE" &&
       curr.x !== undefined &&
@@ -976,6 +1247,7 @@ const handleSendMessage = async (text: string) => {
       const dx = pos.x - curr.x;
       const dy = pos.y - curr.y;
       curr.radius = Math.sqrt(dx * dx + dy * dy);
+      setReadout(`r ${Math.round(curr.radius)}`);
     } else if (
       tool === "ELLIPSE" &&
       curr.x !== undefined &&
@@ -997,6 +1269,7 @@ const handleSendMessage = async (text: string) => {
   const handleMouseUp = () => {
     if (!isMouseDown) return;
     setIsMouseDown(false);
+    setReadout("");
     if (
       tool !== "ERASER" &&
       tool !== "HAND" &&
@@ -1004,15 +1277,48 @@ const handleSendMessage = async (text: string) => {
       tool !== "STICKY_NOTE" &&
       tool !== "TEXT"
     ) {
-      const lastShape = shapes.find((s) => s.id === drawingId.current);
+      let lastShape = shapes.find((s) => s.id === drawingId.current);
       if (lastShape) {
+        // Normalize negative rectangle drags so sizes stay positive.
+        if (
+          lastShape.type === "RECTANGLE" &&
+          ((lastShape.width ?? 0) < 0 || (lastShape.height ?? 0) < 0)
+        ) {
+          const w = lastShape.width ?? 0,
+            h = lastShape.height ?? 0;
+          lastShape = {
+            ...lastShape,
+            x: (lastShape.x ?? 0) + Math.min(0, w),
+            y: (lastShape.y ?? 0) + Math.min(0, h),
+            width: Math.abs(w),
+            height: Math.abs(h),
+          };
+          const fixed = lastShape;
+          setShapes((prev) => prev.map((s) => (s.id === fixed.id ? fixed : s)));
+        }
         broadcastEvent(lastShape.type, lastShape);
+        if (lastShape.kind === "frame" || lastShape.kind === "section") {
+          setToolState("SELECT");
+          setSelectedId(lastShape.id);
+        }
       }
     }
     drawingId.current = null;
   };
 
+  const handleDragMove = (e: any) => {
+    const node = e.target;
+    if (node === stageRef.current) return;
+    if (snap)
+      node.position({
+        x: Math.round(node.x() / GRID) * GRID,
+        y: Math.round(node.y() / GRID) * GRID,
+      });
+    setReadout(`Moving · X ${Math.round(node.x())}  Y ${Math.round(node.y())}`);
+  };
   const handleDragEnd = (e: any, shape: Shape) => {
+    setReadout("");
+    setDraggingId(null);
     recordHistory();
     const updatedShape = { ...shape, x: e.target.x(), y: e.target.y() };
     const dx = updatedShape.x - (shape.x || 0),
@@ -1038,14 +1344,23 @@ const handleSendMessage = async (text: string) => {
     }
   };
 
+  const withoutOverlay = (run: () => void) => {
+    setSelectedId(null);
+    setMultiIds([]);
+    setHoverId(null);
+    setTimeout(() => {
+      overlayRef.current?.visible(false);
+      try {
+        run();
+      } finally {
+        overlayRef.current?.visible(true);
+      }
+    }, 50);
+  };
   const handleExportPNG = () => {
     const stage = stageRef.current;
     if (!stage) return;
-
-    // Tạm thời ẩn Transformer selector nếu đang chọn shape
-    setSelectedId(null);
-
-    setTimeout(() => {
+    withoutOverlay(() => {
       try {
         // Xuất hình ảnh với độ phân giải cao (pixelRatio: 2)
         const dataURL = stage.toDataURL({ pixelRatio: 2 });
@@ -1061,48 +1376,50 @@ const handleSendMessage = async (text: string) => {
           true,
         );
       }
-    }, 50);
+    });
   };
 
   const handleExportPDF = () => {
     const stage = stageRef.current;
     if (!stage) return;
-
-    setSelectedId(null);
-
-    setTimeout(async () => {
+    withoutOverlay(() => {
+      let dataURL = "";
       try {
-        const dataURL = stage.toDataURL({ pixelRatio: 2 });
-        const { default: jsPDF } = await import("jspdf");
-        const pdf = new jsPDF({
-          orientation: "landscape",
-          unit: "px",
-          format: [stage.width(), stage.height()],
-        });
-
-        pdf.addImage(dataURL, "PNG", 0, 0, stage.width(), stage.height());
-        pdf.save(`canvas-room-${roomId}-${Date.now()}.pdf`);
+        dataURL = stage.toDataURL({ pixelRatio: 2 });
       } catch {
-        toast(
-          "PDF export failed. Check image permissions and try again.",
-          true,
-        );
+        toast("PDF export failed. Check image permissions and try again.", true);
+        return;
       }
-    }, 50);
+      import("jspdf")
+        .then(({ default: jsPDF }) => {
+          const pdf = new jsPDF({
+            orientation: "landscape",
+            unit: "px",
+            format: [stage.width(), stage.height()],
+          });
+          pdf.addImage(dataURL, "PNG", 0, 0, stage.width(), stage.height());
+          pdf.save(`canvas-room-${roomId}-${Date.now()}.pdf`);
+        })
+        .catch(() =>
+          toast(
+            "PDF export failed. Check image permissions and try again.",
+            true,
+          ),
+        );
+    });
   };
 
   const selectShape = (id: string, additive = false) => {
+    if (editingRef.current && editingRef.current.id !== id) commitEditing();
     const shape = shapes.find((s) => s.id === id);
     setSelectedId(id);
     if (additive)
-      setMultiIds((prev) =>
-        Array.from(
-          new Set([
-            ...(prev.length ? prev : selectedId ? [selectedId] : []),
-            id,
-          ]),
-        ),
-      );
+      setMultiIds((prev) => {
+        const base = prev.length ? prev : selectedId ? [selectedId] : [];
+        return base.includes(id) && base.length > 1
+          ? base.filter((x) => x !== id)
+          : Array.from(new Set([...base, id]));
+      });
     else
       setMultiIds(
         shape?.groupId
@@ -1110,16 +1427,50 @@ const handleSendMessage = async (text: string) => {
           : [],
       );
   };
-  const changeShape = (patch: Partial<Shape>) => {
+  const selectGroup = (groupId: string) => {
+    const ids = shapes.filter((s) => s.groupId === groupId).map((s) => s.id);
+    setToolState("SELECT");
+    setSelectedId(ids[0] || null);
+    setMultiIds(ids);
+  };
+  const selectAll = () => {
+    const ids = shapes.filter((s) => !s.hidden && !s.locked).map((s) => s.id);
+    setToolState("SELECT");
+    setSelectedId(ids[0] || null);
+    setMultiIds(ids.length > 1 ? ids : []);
+  };
+  const changeShape = (patch: Partial<Shape>, target = selected) => {
     if (
-      !selected ||
-      (selected.locked && !("locked" in patch) && !("hidden" in patch))
+      readOnly ||
+      !target ||
+      (target.locked && !("locked" in patch) && !("hidden" in patch))
     )
       return;
+    if (patch.align && target.type === "TEXT" && !target.width) {
+      const node = stageRef.current?.findOne("#" + target.id);
+      if (node) patch = { ...patch, width: Math.ceil(node.width()) };
+    }
     recordHistory();
-    const next = { ...selected, ...patch };
-    setShapes((prev) => prev.map((s) => (s.id === selected.id ? next : s)));
+    const next = { ...target, ...patch };
+    setShapes((prev) => prev.map((s) => (s.id === target.id ? next : s)));
     broadcastEvent("UPDATE", next);
+  };
+  const toggleSelection = (key: "hidden" | "locked") => {
+    const targets = shapes.filter((s) => selectionIds.includes(s.id));
+    if (!targets.length || readOnly) return;
+    const value = !targets.every((s) => s[key]);
+    recordHistory();
+    const next = shapes.map((s) =>
+      selectionIds.includes(s.id) ? { ...s, [key]: value } : s,
+    );
+    setShapes(next);
+    next
+      .filter((s) => selectionIds.includes(s.id))
+      .forEach((s) => broadcastEvent("UPDATE", s));
+    if (key === "hidden" && value) {
+      setSelectedId(null);
+      setMultiIds([]);
+    }
   };
   const applySnapshot = (entry: HistoryEntry) => {
     // Restore only locally affected objects, not unrelated concurrent additions.
@@ -1176,7 +1527,8 @@ const handleSendMessage = async (text: string) => {
     });
   };
   const deleteSelection = () => {
-    const ids = multiIds.length ? multiIds : selectedId ? [selectedId] : [];
+    if (readOnly || !selectionIds.length) return;
+    const ids = selectionIds;
     recordHistory();
     shapes
       .filter((s) => ids.includes(s.id) && !s.locked)
@@ -1186,7 +1538,8 @@ const handleSendMessage = async (text: string) => {
     setMultiIds([]);
   };
   const duplicateSelection = () => {
-    const ids = multiIds.length ? multiIds : selectedId ? [selectedId] : [];
+    if (readOnly || !selectionIds.length) return;
+    const ids = selectionIds;
     const groupId = multiIds.length > 1 ? crypto.randomUUID() : undefined;
     const copies = shapes
       .filter((s) => ids.includes(s.id))
@@ -1197,27 +1550,61 @@ const handleSendMessage = async (text: string) => {
         y: (s.y || 0) + 24,
         groupId,
         locked: false,
-        name: `${s.name || s.type.toLowerCase()} copy`,
+        name: `${shapeLabel(s)} copy`,
         order: undefined,
       }));
     recordHistory();
     setShapes((prev) => [...prev, ...copies]);
     copies.forEach((s) => broadcastEvent(s.type, s));
+    setSelectedId(copies[0]?.id || null);
+    setMultiIds(copies.length > 1 ? copies.map((c) => c.id) : []);
   };
-  const reorder = (direction: number) => {
-    if (!selectedId) return;
-    const next = [...orderedShapes],
-      index = next.findIndex((s) => s.id === selectedId),
-      target = index + direction;
-    if (target < 0 || target >= next.length) return;
-    [next[index], next[target]] = [next[target], next[index]];
-    recordHistory();
-    const ordered = next.map((s, i) => ({ ...s, order: i }));
+  const commitOrder = (asc: Shape[]) => {
+    const ordered = asc.map((s, i) => ({ ...s, order: i }));
     setShapes(ordered);
-    ordered.forEach((s) => broadcastEvent("UPDATE", s));
+    ordered.forEach((s) => {
+      const prev = shapes.find((p) => p.id === s.id);
+      if (prev?.order !== s.order) broadcastEvent("UPDATE", s);
+    });
+  };
+  const reorder = (direction: "front" | "forward" | "backward" | "back") => {
+    const ids = selectionIds;
+    if (!ids.length || readOnly) return;
+    let asc = [...orderedShapes];
+    if (direction === "front" || direction === "back") {
+      const sel = asc.filter((s) => ids.includes(s.id));
+      const rest = asc.filter((s) => !ids.includes(s.id));
+      asc = direction === "front" ? [...rest, ...sel] : [...sel, ...rest];
+    } else {
+      const step = direction === "forward" ? 1 : -1;
+      const indexes = asc
+        .map((s, i) => (ids.includes(s.id) ? i : -1))
+        .filter((i) => i >= 0);
+      if (step === 1) indexes.reverse();
+      for (const i of indexes) {
+        const j = i + step;
+        if (j < 0 || j >= asc.length || ids.includes(asc[j].id)) continue;
+        [asc[i], asc[j]] = [asc[j], asc[i]];
+      }
+    }
+    recordHistory();
+    commitOrder(asc);
+  };
+  const moveLayer = (dragId: string, targetId: string, after: boolean) => {
+    if (readOnly) return;
+    const asc = [...orderedShapes];
+    const from = asc.findIndex((s) => s.id === dragId);
+    if (from < 0) return;
+    const [item] = asc.splice(from, 1);
+    const to = asc.findIndex((s) => s.id === targetId);
+    // The layer list is top-first, so "after" (below) means lower z-order.
+    asc.splice(after ? to : to + 1, 0, item);
+    recordHistory();
+    commitOrder(asc);
   };
   const groupSelection = () => {
     if (
+      readOnly ||
       multiIds.length < 2 ||
       multiIds.some((id) => shapes.find((s) => s.id === id)?.locked)
     )
@@ -1231,65 +1618,131 @@ const handleSendMessage = async (text: string) => {
     next
       .filter((s) => multiIds.includes(s.id))
       .forEach((s) => broadcastEvent("UPDATE", s));
+    toast(`Grouped ${multiIds.length} objects.`, "info");
   };
   const ungroupSelection = () => {
-    if (!selected?.groupId) return;
+    const groupIds = new Set(
+      shapes
+        .filter((s) => selectionIds.includes(s.id) && s.groupId)
+        .map((s) => s.groupId),
+    );
+    if (readOnly || !groupIds.size) return;
     recordHistory();
     const next = shapes.map((s) =>
-      s.groupId === selected.groupId ? { ...s, groupId: undefined } : s,
+      groupIds.has(s.groupId) ? { ...s, groupId: undefined } : s,
     );
     setShapes(next);
     next
-      .filter(
-        (s) => shapes.find((p) => p.id === s.id)?.groupId === selected.groupId,
-      )
+      .filter((s) => groupIds.has(shapes.find((p) => p.id === s.id)?.groupId))
       .forEach((s) => broadcastEvent("UPDATE", s));
     setMultiIds([]);
   };
-  const alignSelection = () => {
-    if (multiIds.length < 2) return;
-    const bounds = new Map<string, number>();
-    multiIds.forEach((id) => {
-      const node = stageRef.current?.findOne("#" + id);
-      if (node)
-        bounds.set(id, node.getClientRect({ relativeTo: stageRef.current }).x);
+  const alignSelection = (mode: AlignMode) => {
+    if (readOnly) return;
+    const stage = stageRef.current;
+    const rects = new Map<string, { x: number; y: number; width: number; height: number }>();
+    selectionIds.forEach((id) => {
+      const node = stage?.findOne("#" + id);
+      if (node && !shapes.find((s) => s.id === id)?.locked)
+        rects.set(id, node.getClientRect({ relativeTo: stage }));
     });
-    if (bounds.size < 2) return;
-    const minX = Math.min(...bounds.values());
+    if (rects.size < 2) return;
+    const list = [...rects.entries()];
+    const minX = Math.min(...list.map(([, r]) => r.x));
+    const minY = Math.min(...list.map(([, r]) => r.y));
+    const maxX = Math.max(...list.map(([, r]) => r.x + r.width));
+    const maxY = Math.max(...list.map(([, r]) => r.y + r.height));
+    const delta = new Map<string, { dx: number; dy: number }>();
+    if (mode === "distribute-h" || mode === "distribute-v") {
+      if (rects.size < 3) return;
+      const horizontal = mode === "distribute-h";
+      const sorted = list.toSorted(([, a], [, b]) =>
+        horizontal ? a.x - b.x : a.y - b.y,
+      );
+      const total = sorted.reduce(
+        (n, [, r]) => n + (horizontal ? r.width : r.height),
+        0,
+      );
+      const gap =
+        ((horizontal ? maxX - minX : maxY - minY) - total) / (sorted.length - 1);
+      let cursor = horizontal ? minX : minY;
+      for (const [id, r] of sorted) {
+        delta.set(
+          id,
+          horizontal
+            ? { dx: cursor - r.x, dy: 0 }
+            : { dx: 0, dy: cursor - r.y },
+        );
+        cursor += (horizontal ? r.width : r.height) + gap;
+      }
+    } else
+      for (const [id, r] of list)
+        delta.set(id, {
+          dx:
+            mode === "left"
+              ? minX - r.x
+              : mode === "center"
+                ? (minX + maxX) / 2 - (r.x + r.width / 2)
+                : mode === "right"
+                  ? maxX - (r.x + r.width)
+                  : 0,
+          dy:
+            mode === "top"
+              ? minY - r.y
+              : mode === "middle"
+                ? (minY + maxY) / 2 - (r.y + r.height / 2)
+                : mode === "bottom"
+                  ? maxY - (r.y + r.height)
+                  : 0,
+        });
     recordHistory();
-    const next = shapes.map((s) =>
-      bounds.has(s.id) && !s.locked
-        ? { ...s, x: (s.x || 0) + minX - bounds.get(s.id)! }
-        : s,
-    );
+    const next = shapes.map((s) => {
+      const d = delta.get(s.id);
+      return d ? { ...s, x: (s.x || 0) + d.dx, y: (s.y || 0) + d.dy } : s;
+    });
     setShapes(next);
     next
-      .filter((s) => multiIds.includes(s.id))
+      .filter((s) => delta.has(s.id))
       .forEach((s) => broadcastEvent("UPDATE", s));
+  };
+  const nudge = (dx: number, dy: number) => {
+    const ids = selectionIds.filter(
+      (id) => !shapes.find((s) => s.id === id)?.locked,
+    );
+    if (!ids.length || readOnly) return;
+    recordHistory();
+    const next = shapes.map((s) =>
+      ids.includes(s.id) ? { ...s, x: (s.x || 0) + dx, y: (s.y || 0) + dy } : s,
+    );
+    setShapes(next);
+    next.filter((s) => ids.includes(s.id)).forEach((s) => broadcastEvent("UPDATE", s));
   };
   const insertImage = (url: string, name: string) => {
     recordHistory();
     const shape: Shape = {
       id: `shape-${crypto.randomUUID()}`,
       type: "IMAGE",
-      x: (100 - stagePos.x) / stageScale,
-      y: (100 - stagePos.y) / stageScale,
+      x: (size.width / 2 - 120 - stagePos.x) / stageScale,
+      y: (size.height / 2 - 120 - stagePos.y) / stageScale,
       width: 240,
       height: 240,
       imageUrl: url,
       name,
+      fit: "cover",
       color: "transparent",
     };
     setShapes((prev) => [...prev, shape]);
     broadcastEvent("IMAGE", shape);
     setLibraryOpen(false);
-    setTool("SELECT");
+    setToolState("SELECT");
     setSelectedId(shape.id);
+    toast(`${name} added to the canvas.`);
   };
   const transformShape = (e: any) => {
+    setReadout("");
     const node = e.target,
       shape = shapes.find((s) => s.id === node.id());
-    if (!shape || shape.locked) return;
+    if (!shape || shape.locked || readOnly) return;
     recordHistory();
     const sx = node.scaleX(),
       sy = node.scaleY();
@@ -1339,22 +1792,80 @@ const handleSendMessage = async (text: string) => {
         )
       )
         return;
-      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+      const mod = e.metaKey || e.ctrlKey;
+      // Navigation shortcuts — available in read-only mode too.
+      if (e.shiftKey && (e.key === "!" || e.code === "Digit1")) {
+        e.preventDefault();
+        fitToScreen();
+        return;
+      }
+      if (e.shiftKey && (e.key === ")" || e.code === "Digit0")) {
+        e.preventDefault();
+        resetView();
+        return;
+      }
+      if (mod && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        zoomTo(stageScale * 1.2);
+        return;
+      }
+      if (mod && e.key === "-") {
+        e.preventDefault();
+        zoomTo(stageScale / 1.2);
+        return;
+      }
+      if (e.shiftKey && !mod && e.key.toLowerCase() === "g") {
+        setGrid(!grid);
+        return;
+      }
+      if (e.key === "Escape") {
+        setSelectedId(null);
+        setMultiIds([]);
+        setToolState("SELECT");
+        return;
+      }
+      if (readOnly) {
+        if (!mod && e.key.toLowerCase() === "v") setToolState("SELECT");
+        if (!mod && e.key.toLowerCase() === "h") setToolState("HAND");
+        return;
+      }
+      if (e.shiftKey && !mod && e.key.toLowerCase() === "s") {
+        setSnap(!snap);
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === "d") {
+      } else if (mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicateSelection();
+      } else if (mod && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        selectAll();
+      } else if (mod && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        if (e.shiftKey) ungroupSelection();
+        else groupSelection();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelection();
-      } else if (e.key === "Escape") {
-        setSelectedId(null);
-        setMultiIds([]);
-        setTool("SELECT");
-      } else if (!e.metaKey && !e.ctrlKey) {
-        const keys: Record<string, typeof tool> = {
+      } else if (e.key === "]" || e.key === "}") {
+        reorder(e.shiftKey || e.key === "}" ? "front" : "forward");
+      } else if (e.key === "[" || e.key === "{") {
+        reorder(e.shiftKey || e.key === "{" ? "back" : "backward");
+      } else if (e.key.startsWith("Arrow") && selectionIds.length) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        nudge(
+          e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0,
+          e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0,
+        );
+      } else if (e.key === "Enter" && selected) {
+        e.preventDefault();
+        startEditing(selected);
+      } else if (!mod && !e.shiftKey) {
+        const keys: Record<string, Tool> = {
           v: "SELECT",
           h: "HAND",
           p: "FREEHAND",
@@ -1363,14 +1874,186 @@ const handleSendMessage = async (text: string) => {
           t: "TEXT",
           e: "ERASER",
           l: "LINE",
+          a: "ARROW",
+          s: "STICKY_NOTE",
           f: "FRAME",
         };
-        if (keys[e.key.toLowerCase()]) setTool(keys[e.key.toLowerCase()]);
+        const next = keys[e.key.toLowerCase()];
+        if (next) {
+          if (["RECTANGLE", "CIRCLE", "LINE", "ARROW"].includes(next))
+            setShapeTool(next);
+          setTool(next);
+        }
       }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   });
+
+  // Shared Konva props for every object.
+  const common = (s: Shape) => ({
+    id: s.id,
+    draggable: tool === "SELECT" && !isSpacePressed && !s.locked && !readOnly,
+    onDragStart: () => {
+      setHoverId(null);
+      setDraggingId(s.id);
+    },
+    onDragMove: handleDragMove,
+    onDragEnd: (e: any) => handleDragEnd(e, s),
+    onClick: (e: any) => {
+      if (e.evt.button === 2) return;
+      if (tool === "SELECT" || tool === "HAND") selectShape(s.id, e.evt.shiftKey);
+    },
+    onTap: () => selectShape(s.id),
+    onDblClick: () => startEditing(s),
+    onDblTap: () => startEditing(s),
+    onMouseEnter: (e: any) => {
+      handleShapeHover(e);
+      if (tool === "SELECT" && !isMouseDown) setHoverId(s.id);
+    },
+    onMouseLeave: () => setHoverId((h) => (h === s.id ? null : h)),
+  });
+
+  // Derived interaction state
+  const syncState: SyncState = readOnly
+    ? "readonly"
+    : demo
+      ? "local"
+      : conn === "failed"
+        ? "failed"
+        : conn === "connecting"
+          ? "connecting"
+          : conn === "reconnecting"
+            ? queued
+              ? "offline"
+              : "reconnecting"
+            : saveState === "saving"
+              ? "saving"
+              : saveState === "saved"
+                ? "saved"
+                : "connected";
+  const syncLabel =
+    syncState === "offline"
+      ? `Offline · ${queued} queued`
+      : syncState === "saved"
+        ? "Synced"
+        : syncState === "local"
+          ? "Saved locally"
+          : undefined;
+  const presence = demo
+    ? [{ name: "Sarah Chen", color: "#2455d6" }]
+    : Object.values(cursors).map((c) => ({
+        name:
+          members.find((m) => m.username === c.username)?.fullName || c.username,
+        color: c.color,
+      }));
+  const hoverRect = (() => {
+    if (
+      !hoverId ||
+      tool !== "SELECT" ||
+      selectionIds.includes(hoverId) ||
+      draggingId ||
+      !stageRef.current
+    )
+      return null;
+    const node = stageRef.current.findOne("#" + hoverId);
+    return node ? node.getClientRect({ relativeTo: stageRef.current }) : null;
+  })();
+  const editingShape = editing && shapes.find((s) => s.id === editing.id);
+  const gridSize = GRID * stageScale * (GRID * stageScale < 9 ? 4 : 1);
+  const menuTarget = menu?.target ? shapes.find((s) => s.id === menu.target) : undefined;
+  const runMenu = (fn: () => void) => () => {
+    setMenu(null);
+    fn();
+  };
+  const canGroup =
+    multiIds.length > 1 &&
+    !multiIds.every(
+      (id) =>
+        shapes.find((s) => s.id === id)?.groupId &&
+        shapes.find((s) => s.id === id)?.groupId ===
+          shapes.find((s) => s.id === multiIds[0])?.groupId,
+    );
+  const canUngroup = shapes.some(
+    (s) => selectionIds.includes(s.id) && s.groupId,
+  );
+  const addStickyAt = (point: { x: number; y: number }) => {
+    if (readOnly) return;
+    recordHistory();
+    const id = `shape-${crypto.randomUUID()}`;
+    pendingNew.current = id;
+    setShapes((prev) => [
+      ...prev,
+      {
+        id,
+        type: "STICKY_NOTE",
+        x: point.x,
+        y: point.y,
+        width: 180,
+        height: 160,
+        text: "",
+        color: noteColor,
+        fill: noteColor,
+      },
+    ]);
+    setToolState("SELECT");
+    setSelectedId(id);
+    setEditing({ id, value: "" });
+  };
+  const handleContextMenu = (e: any) => {
+    e.evt.preventDefault();
+    if (editingRef.current) commitEditing();
+    const id = findShapeId(e.target);
+    if (id && !selectionIds.includes(id)) {
+      setToolState("SELECT");
+      selectShape(id);
+    }
+    if (!id) {
+      setSelectedId(null);
+      setMultiIds([]);
+    }
+    setMenu({
+      x: e.evt.clientX,
+      y: e.evt.clientY,
+      target: id,
+      point: getRelativePointerPosition(stageRef.current),
+    });
+  };
+  const toolName = tool.toLowerCase().replace("_", " ");
+  const statusText =
+    multiIds.length > 1
+      ? `${multiIds.length} objects selected`
+      : selected
+        ? `${shapeLabel(selected)}${selected.locked ? " · locked" : ""}`
+        : `${shapes.length} objects · ${readOnly ? "view only" : toolName}`;
+  const editorStyle = (() => {
+    if (!editingShape) return null;
+    const sticky = editingShape.type === "STICKY_NOTE";
+    const pad = sticky ? 12 : 0;
+    const fontStyle = editingShape.fontStyle || "normal";
+    return {
+      sticky,
+      style: {
+        left: stagePos.x + ((editingShape.x || 0) + pad) * stageScale,
+        top: stagePos.y + ((editingShape.y || 0) + pad) * stageScale,
+        fontSize: (editingShape.fontSize || (sticky ? 14 : 18)) * stageScale,
+        fontFamily: editingShape.fontFamily || PLEX,
+        fontWeight: fontStyle.includes("bold") ? 700 : 400,
+        fontStyle: fontStyle.includes("italic") ? "italic" : "normal",
+        color: sticky ? editingShape.textColor || "#4b543e" : editingShape.color,
+        textAlign: editingShape.align || "left",
+        transform: `rotate(${editingShape.rotation || 0}deg)`,
+        width: sticky
+          ? ((editingShape.width || 160) - 24) * stageScale
+          : editingShape.width
+            ? editingShape.width * stageScale
+            : undefined,
+        height: sticky
+          ? ((editingShape.height || 160) - 24) * stageScale
+          : undefined,
+      } as React.CSSProperties,
+    };
+  })();
   return (
     <div className="canvas-engine">
       {view === "chat" && (
@@ -1378,11 +2061,16 @@ const handleSendMessage = async (text: string) => {
           messages={messages}
           setMessages={setMessages}
           connected={connected}
+          connection={demo ? "connected" : conn}
           onSend={handleSendMessage}
         />
       )}
       <div
-        className={view === "canvas" ? "canvas-editor" : "room-engine-hidden"}
+        className={
+          view === "canvas"
+            ? `canvas-editor ${readOnly ? "is-readonly" : ""}`
+            : "room-engine-hidden"
+        }
       >
         <div className="canvas-top-toolbar">
           <div className="canvas-toolbar-group">
@@ -1390,61 +2078,110 @@ const handleSendMessage = async (text: string) => {
               icon="panel"
               label="Toggle layers"
               aria-pressed={showLayers}
-              onClick={() => setShowLayers(!showLayers)}
+              onClick={() => {
+                setShowLayers(!showLayers);
+                writeCanvasPrefs({ layers: !showLayers });
+              }}
             />
             <span className="toolbar-divider" />
-            <IconButton
-              icon="undo"
-              label="Undo (Ctrl/⌘ Z)"
-              disabled={!historyCounts.undo}
-              onClick={undo}
-            />
-            <IconButton
-              icon="redo"
-              label="Redo (Ctrl/⌘ Shift Z)"
-              disabled={!historyCounts.redo}
-              onClick={redo}
-            />
-            <span className="toolbar-divider" />
-            <span className="canvas-sync">
-              <span
-                className={`status-dot ${!demo && !connected ? "offline" : ""}`}
-              />
-              {syncStatus}
-            </span>
+            {!readOnly && (
+              <>
+                <IconButton
+                  icon="undo"
+                  label="Undo (Ctrl/⌘ Z)"
+                  disabled={!historyCounts.undo}
+                  onClick={undo}
+                />
+                <IconButton
+                  icon="redo"
+                  label="Redo (Ctrl/⌘ Shift Z)"
+                  disabled={!historyCounts.redo}
+                  onClick={redo}
+                />
+                <span className="toolbar-divider" />
+              </>
+            )}
+            <StatusIndicator state={syncState} label={syncLabel} />
           </div>
           <div className="canvas-toolbar-group">
+            {presence.length > 0 && (
+              <>
+                <Presence
+                  people={presence}
+                  label={demo ? "Sarah · sample" : `${presence.length} here`}
+                  sample={demo}
+                />
+                <span className="toolbar-divider" />
+              </>
+            )}
             <Button variant="ghost" onClick={handleExportPNG} icon="download">
               PNG
             </Button>
             <Button variant="ghost" onClick={handleExportPDF}>
               PDF
             </Button>
-            <Button
-              variant="ghost"
-              icon="refresh"
-              disabled={demo || !connected}
-              onClick={() => {
-                shapes.forEach((s) => broadcastEvent("UPDATE", s));
-                toast(
-                  "Canvas objects sent. Server receipt does not guarantee database persistence.",
-                );
-              }}
-            >
-              Sync
-            </Button>
+            {!demo && !readOnly && (
+              <Button
+                variant="ghost"
+                icon="refresh"
+                disabled={!connected}
+                title="Resend every object to the server"
+                onClick={() => {
+                  shapes.forEach((s) => broadcastEvent("UPDATE", s));
+                  toast(
+                    "Canvas objects sent. Server receipt does not guarantee database persistence.",
+                    "info",
+                  );
+                }}
+              >
+                Sync
+              </Button>
+            )}
             <Button icon="users" onClick={() => setShareOpen(true)}>
               Share
             </Button>
             <IconButton
-              icon="settings"
+              icon="panel-right"
               label="Toggle properties panel"
               aria-pressed={showInspector}
               onClick={() => setShowInspector(!showInspector)}
             />
           </div>
         </div>
-        {canvasError && (
+        {readOnly && (
+          <div className="canvas-banner readonly" role="status">
+            <Icon name="eye" size={14} />
+            <span>
+              You’re viewing this canvas. Editing requires the Member role or
+              higher.
+            </span>
+            <RoleBadge role={role} />
+          </div>
+        )}
+        {!demo && conn === "reconnecting" && (
+          <div className="canvas-banner warning" role="status">
+            <Spinner size={12} />
+            <span>
+              Connection lost. Reconnecting…{" "}
+              {queued
+                ? `${queued} change${queued === 1 ? "" : "s"} will sync when the connection returns.`
+                : "New changes are queued in this tab."}
+            </span>
+          </div>
+        )}
+        {!demo && conn === "failed" && (
+          <div className="canvas-banner error" role="alert">
+            <Icon name="alert" size={14} />
+            <span>
+              Changes can’t be saved. The room connection was rejected — your
+              edits stay in this tab.
+            </span>
+            <Button variant="ghost" icon="refresh" onClick={retryConnection}>
+              Retry
+            </Button>
+          </div>
+        )}
+        {canvasError && conn !== "failed" && (
           <div className="canvas-error">
             <Notice tone="error">
               {canvasError}{" "}
@@ -1456,162 +2193,74 @@ const handleSendMessage = async (text: string) => {
         )}
         <div className="canvas-body">
           {showLayers && (
-            <aside className="canvas-layers">
-              <div className="canvas-panel-heading">
-                <strong>Layers</strong>
-                <Badge>{shapes.length}</Badge>
-              </div>
-              <div className="canvas-layer-list">
-                {orderedShapes.toReversed().map((s) => (
-                  <div
-                    key={s.id}
-                    className={`canvas-layer-row ${selectedId === s.id || multiIds.includes(s.id) ? "active" : ""} ${s.hidden ? "layer-hidden" : ""}`}
-                  >
-                    <Button
-                      variant="ghost"
-                      onClick={(e) => {
-                        setTool("SELECT");
-                        selectShape(s.id, e.shiftKey);
-                      }}
-                    >
-                      <Icon
-                        name={
-                          s.type === "TEXT"
-                            ? "text"
-                            : s.type === "IMAGE"
-                              ? "image"
-                              : s.kind
-                                ? "frame"
-                                : s.groupId
-                                  ? "layers"
-                                  : s.type === "STICKY_NOTE"
-                                    ? "sticky"
-                                    : s.type === "FREEHAND"
-                                      ? "pen"
-                                      : "rect"
-                        }
-                        size={13}
-                      />
-                      <span>
-                        {s.name ||
-                          s.kind ||
-                          s.type.toLowerCase().replace("_", " ")}
-                      </span>
-                    </Button>
-                    <IconButton
-                      icon={s.hidden ? "eyeoff" : "eye"}
-                      label={`${s.hidden ? "Show" : "Hide"} layer`}
-                      onClick={() => {
-                        recordHistory();
-                        const next = { ...s, hidden: !s.hidden };
-                        setShapes((prev) =>
-                          prev.map((p) => (p.id === s.id ? next : p)),
-                        );
-                        broadcastEvent("UPDATE", next);
-                      }}
-                    />
-                    <IconButton
-                      icon={s.locked ? "lock" : "edit"}
-                      label={`${s.locked ? "Unlock" : "Lock"} layer`}
-                      onClick={() => {
-                        recordHistory();
-                        const next = { ...s, locked: !s.locked };
-                        setShapes((prev) =>
-                          prev.map((p) => (p.id === s.id ? next : p)),
-                        );
-                        broadcastEvent("UPDATE", next);
-                      }}
-                    />
-                  </div>
-                ))}
-              </div>
-              <div className="canvas-layer-footer">
-                <span>Shift + click to select multiple.</span>
-                <div>
-                  <Button
-                    variant="ghost"
-                    disabled={multiIds.length < 2}
-                    onClick={groupSelection}
-                  >
-                    Group
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    disabled={!selected?.groupId}
-                    onClick={ungroupSelection}
-                  >
-                    Ungroup
-                  </Button>
-                </div>
-                <p>
-                  Frames organize visually. They do not clip or auto-layout
-                  their children.
-                </p>
-              </div>
-            </aside>
+            <CanvasLayers
+              shapes={orderedShapes}
+              selectedIds={selectionIds}
+              readOnly={readOnly}
+              onSelect={(id, additive) => {
+                setToolState("SELECT");
+                selectShape(id, additive);
+              }}
+              onSelectGroup={selectGroup}
+              onToggle={(s, key) => {
+                recordHistory();
+                const next = { ...s, [key]: !s[key] };
+                setShapes((prev) => prev.map((p) => (p.id === s.id ? next : p)));
+                broadcastEvent("UPDATE", next);
+              }}
+              onMove={moveLayer}
+              onGroup={groupSelection}
+              onUngroup={ungroupSelection}
+              canGroup={canGroup}
+              canUngroup={canUngroup}
+              onClose={() => {
+                setShowLayers(false);
+                writeCanvasPrefs({ layers: false });
+              }}
+            />
           )}
           <div className="canvas-center">
-            <div
-              className="canvas-tool-rail"
-              role="toolbar"
-              aria-label="Canvas tools"
-            >
-              {[
-                { id: "SELECT", icon: "cursor", label: "Select (V)" },
-                { id: "HAND", icon: "hand", label: "Hand / pan (H)" },
-                { id: "FREEHAND", icon: "pen", label: "Pen (P)" },
-                { id: "ERASER", icon: "eraser", label: "Eraser (E)" },
-                { id: "RECTANGLE", icon: "rect", label: "Rectangle (R)" },
-                { id: "CIRCLE", icon: "circle", label: "Circle (O)" },
-                { id: "ELLIPSE", icon: "ellipse", label: "Ellipse" },
-                { id: "LINE", icon: "minus", label: "Line (L)" },
-                { id: "ARROW", icon: "diagonal", label: "Arrow" },
-                { id: "TEXT", icon: "text", label: "Text (T)" },
-                { id: "STICKY_NOTE", icon: "sticky", label: "Sticky note" },
-                { id: "FRAME", icon: "frame", label: "Frame (F)" },
-                { id: "SECTION", icon: "grid", label: "Section" },
-                {
-                  id: "CONNECTOR",
-                  icon: "link",
-                  label: "Connector (manual endpoints)",
-                },
-              ].map((t) => (
-                <IconButton
-                  key={t.id}
-                  icon={t.icon}
-                  label={t.label}
-                  aria-pressed={tool === t.id}
-                  className={tool === t.id ? "active" : ""}
-                  onClick={() => {
-                    setTool(t.id as typeof tool);
-                    setSelectedId(null);
-                    setMultiIds([]);
-                  }}
-                />
-              ))}
-              <span className="rail-divider" />
-              <IconButton
-                icon="image"
-                label="Upload image"
-                onClick={() => fileInputRef.current?.click()}
+            <CanvasToolRail
+              tool={tool}
+              setTool={setTool}
+              shapeTool={shapeTool}
+              setShapeTool={setShapeTool}
+              readOnly={readOnly}
+              onUpload={() => fileInputRef.current?.click()}
+              onLibrary={() => setLibraryOpen(true)}
+            />
+            <Input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleImageUpload}
+              accept="image/*"
+              className="sr-only"
+              tabIndex={-1}
+              aria-label="Upload image to canvas"
+            />
+            {!readOnly && (
+              <CanvasToolOptions
+                tool={tool}
+                color={color}
+                setColor={setColor}
+                strokeWidth={strokeWidth}
+                setStrokeWidth={setStrokeWidth}
+                noteColor={noteColor}
+                setNoteColor={setNoteColor}
               />
-              <IconButton
-                icon="folder"
-                label="Insert from media library"
-                onClick={() => setLibraryOpen(true)}
-              />
-              <Input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleImageUpload}
-                accept="image/*"
-                className="sr-only"
-              />
-            </div>
+            )}
             {/* Stage Container */}
             <div
               ref={containerRef}
-              className={`canvas-stage-container ${grid ? "with-grid" : ""}`}
+              className={`canvas-stage-container ${grid ? "with-grid" : ""} ${isSpacePressed || tool === "HAND" ? "is-panning" : ""}`}
+              style={
+                grid
+                  ? {
+                      backgroundSize: `${gridSize}px ${gridSize}px`,
+                      backgroundPosition: `${stagePos.x}px ${stagePos.y}px`,
+                    }
+                  : undefined
+              }
             >
               <Stage
                 ref={stageRef}
@@ -1629,6 +2278,12 @@ const handleSendMessage = async (text: string) => {
                 onTouchStart={handleMouseDown}
                 onTouchMove={handleMouseMove}
                 onTouchEnd={handleMouseUp}
+                onContextMenu={handleContextMenu}
+                onMouseLeave={() => setHoverId(null)}
+                onDragMove={(e) => {
+                  if (e.target === stageRef.current)
+                    setStagePos({ x: e.target.x(), y: e.target.y() });
+                }}
                 onDragEnd={(e) => {
                   if (e.target === stageRef.current) {
                     setStagePos({ x: e.target.x(), y: e.target.y() });
@@ -1639,8 +2294,12 @@ const handleSendMessage = async (text: string) => {
                     isSpacePressed || tool === "HAND"
                       ? "grab"
                       : tool === "SELECT"
-                        ? "default"
-                        : "crosshair",
+                        ? hoverId && !readOnly
+                          ? "move"
+                          : "default"
+                        : tool === "TEXT"
+                          ? "text"
+                          : "crosshair",
                 }}
               >
                 <Layer onTransformEnd={transformShape}>
@@ -1648,59 +2307,61 @@ const handleSendMessage = async (text: string) => {
                   {orderedShapes
                     .filter((s) => !s.hidden)
                     .map((s) => {
-                      const isDraggable =
-                        tool === "SELECT" && !isSpacePressed && !s.locked;
                       if (s.type === "FREEHAND" && s.points) {
                         return (
                           <Line
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             x={s.x}
                             y={s.y}
                             {...appearance(s)}
                             points={s.points}
                             stroke={s.color}
                             strokeWidth={s.strokeWidth ?? 3}
+                            hitStrokeWidth={Math.max(12, s.strokeWidth ?? 3)}
                             tension={0.5}
                             lineCap="round"
                             lineJoin="round"
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           />
                         );
                       } else if (s.type === "RECTANGLE") {
                         return (
-                          <Rect
-                            key={s.id}
-                            id={s.id}
-                            {...appearance(s)}
-                            dash={s.kind === "section" ? [8, 5] : undefined}
-                            x={s.x}
-                            y={s.y}
-                            width={s.width}
-                            height={s.height}
-                            stroke={s.color}
-                            strokeWidth={s.strokeWidth ?? 2}
-                            fill={s.fill || `${s.color}22`}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
-                          />
+                          <React.Fragment key={s.id}>
+                            <Rect
+                              {...common(s)}
+                              {...appearance(s)}
+                              dash={s.kind === "section" ? [8, 5] : undefined}
+                              x={s.x}
+                              y={s.y}
+                              width={s.width}
+                              height={s.height}
+                              stroke={s.color}
+                              strokeWidth={s.strokeWidth ?? 2}
+                              fill={s.fill || `${s.color}22`}
+                              cornerRadius={s.kind === "section" ? 6 : 0}
+                            />
+                            {s.kind && draggingId !== s.id && (
+                              <Text
+                                x={s.x}
+                                y={(s.y || 0) - 18 / stageScale}
+                                text={shapeLabel(s)}
+                                fontSize={11 / stageScale}
+                                fontFamily="IBM Plex Mono, monospace"
+                                fill={
+                                  selectionIds.includes(s.id)
+                                    ? "#2455d6"
+                                    : "#74766f"
+                                }
+                                listening={false}
+                              />
+                            )}
+                          </React.Fragment>
                         );
                       } else if (s.type === "CIRCLE") {
                         return (
                           <Circle
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             {...appearance(s)}
                             x={s.x}
                             y={s.y}
@@ -1708,20 +2369,13 @@ const handleSendMessage = async (text: string) => {
                             stroke={s.color}
                             strokeWidth={s.strokeWidth ?? 2}
                             fill={s.fill || `${s.color}22`}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           />
                         );
                       } else if (s.type === "ELLIPSE") {
                         return (
                           <Ellipse
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             x={s.x}
                             y={s.y}
                             {...appearance(s)}
@@ -1730,36 +2384,28 @@ const handleSendMessage = async (text: string) => {
                             stroke={s.color}
                             strokeWidth={s.strokeWidth ?? 2}
                             fill={s.fill || `${s.color}22`}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e) => selectShape(s.id, e.evt.shiftKey)}
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           />
                         );
                       } else if (s.type === "LINE" && s.points) {
                         return (
                           <Line
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             x={s.x}
                             y={s.y}
                             {...appearance(s)}
                             points={s.points}
                             stroke={s.color}
                             strokeWidth={s.strokeWidth ?? 2}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e) => selectShape(s.id, e.evt.shiftKey)}
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
+                            hitStrokeWidth={Math.max(12, s.strokeWidth ?? 2)}
+                            lineCap="round"
                           />
                         );
                       } else if (s.type === "ARROW" && s.points) {
                         return (
                           <Arrow
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             x={s.x}
                             y={s.y}
                             {...appearance(s)}
@@ -1767,88 +2413,84 @@ const handleSendMessage = async (text: string) => {
                             stroke={s.color}
                             fill={s.color}
                             strokeWidth={s.strokeWidth ?? 3}
+                            hitStrokeWidth={Math.max(12, s.strokeWidth ?? 3)}
+                            dash={s.kind === "connector" ? [10, 6] : undefined}
                             pointerLength={10}
                             pointerWidth={10}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           />
                         );
                       } else if (s.type === "STICKY_NOTE") {
+                        const w = s.width || 160,
+                          h = s.height || 160;
                         return (
                           <Group
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             {...appearance(s)}
                             x={s.x}
                             y={s.y}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           >
                             <Rect
-                              width={s.width || 160}
-                              height={s.height || 160}
+                              width={w}
+                              height={h}
                               fill={s.fill || s.color}
                               cornerRadius={2}
                               stroke={s.color}
                               strokeWidth={s.strokeWidth ?? 1}
+                              shadowColor="#20221f"
+                              shadowOpacity={0.07}
+                              shadowBlur={8}
+                              shadowOffsetY={3}
                             />
                             <Text
                               text={s.text}
                               x={12}
                               y={12}
-                              width={(s.width || 160) - 24}
-                              fontSize={14}
-                              fontFamily="IBM Plex Sans, sans-serif"
-                              fill="#4b543e"
+                              width={w - 24}
+                              height={h - 24}
+                              fontSize={s.fontSize || 14}
+                              fontFamily={s.fontFamily || PLEX}
+                              fontStyle={s.fontStyle || "normal"}
+                              align={s.align || "left"}
+                              fill={s.textColor || "#4b543e"}
+                              opacity={editing?.id === s.id ? 0 : 1}
+                              lineHeight={1.25}
                               wrap="word"
+                              ellipsis
                             />
+                            {!s.text && editing?.id !== s.id && (
+                              <Text
+                                text={readOnly ? "Empty note" : "Double-click to write"}
+                                x={12}
+                                y={12}
+                                fontSize={12}
+                                fontFamily={PLEX}
+                                fill="#9a9f8f"
+                                listening={false}
+                              />
+                            )}
                           </Group>
                         );
                       } else if (s.type === "TEXT") {
                         return (
                           <Text
                             key={s.id}
-                            id={s.id}
+                            {...common(s)}
                             {...appearance(s)}
+                            opacity={editing?.id === s.id ? 0 : (s.opacity ?? 1)}
                             x={s.x}
                             y={s.y}
-                            text={s.text}
+                            text={s.text || " "}
+                            width={s.width}
+                            align={s.align || "left"}
                             fontSize={s.fontSize || 18}
-                            fontFamily="IBM Plex Sans, sans-serif"
+                            fontFamily={s.fontFamily || PLEX}
+                            fontStyle={s.fontStyle || "normal"}
                             fill={s.color}
-                            draggable={isDraggable}
-                            onDragEnd={(e) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
                           />
                         );
                       } else if (s.type === "IMAGE") {
-                        return (
-                          <URLImage
-                            key={s.id}
-                            shape={s}
-                            isDraggable={isDraggable}
-                            onDragEnd={(e: any) => handleDragEnd(e, s)}
-                            onClick={(e: any) =>
-                              selectShape(s.id, e.evt.shiftKey)
-                            }
-                            onTap={() => selectShape(s.id)}
-                            onMouseEnter={handleShapeHover}
-                          />
-                        );
+                        return <URLImage key={s.id} shape={s} common={common(s)} />;
                       }
                       return null;
                     })}
@@ -1856,10 +2498,24 @@ const handleSendMessage = async (text: string) => {
                   {tool === "SELECT" &&
                     selectedId &&
                     !selected?.locked &&
+                    !readOnly &&
+                    !editing &&
                     !isSpacePressed && (
                       <Transformer
                         ref={transformerRef}
                         flipEnabled={false}
+                        anchorSize={8}
+                        anchorCornerRadius={2}
+                        borderStroke="#2455d6"
+                        anchorStroke="#2455d6"
+                        rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
+                        onTransform={() => {
+                          const tr = transformerRef.current;
+                          if (tr)
+                            setReadout(
+                              `Resizing · ${Math.round(tr.width() / stageScale)} × ${Math.round(tr.height() / stageScale)}`,
+                            );
+                        }}
                         boundBoxFunc={(oldBox, newBox) =>
                           Math.abs(newBox.width) < 5 ||
                           Math.abs(newBox.height) < 5
@@ -1868,7 +2524,60 @@ const handleSendMessage = async (text: string) => {
                         }
                       />
                     )}
-
+                </Layer>
+                <Layer ref={overlayRef} listening={false}>
+                  {hoverRect && (
+                    <Rect
+                      x={hoverRect.x}
+                      y={hoverRect.y}
+                      width={hoverRect.width}
+                      height={hoverRect.height}
+                      stroke="#2455d6"
+                      strokeWidth={1.5 / stageScale}
+                      opacity={0.7}
+                    />
+                  )}
+                  {readOnly &&
+                    selectionIds.map((id) => {
+                      const node = stageRef.current?.findOne("#" + id);
+                      if (!node) return null;
+                      const r = node.getClientRect({ relativeTo: stageRef.current });
+                      return (
+                        <Rect
+                          key={id}
+                          {...r}
+                          stroke="#2455d6"
+                          strokeWidth={1.5 / stageScale}
+                          dash={[4 / stageScale, 3 / stageScale]}
+                        />
+                      );
+                    })}
+                  {demo && (
+                    <Group ref={sampleCursorRef} x={520} y={240}>
+                      <Arrow
+                        points={[0, 0, 0, 14, 4, 10, 10, 16, 13, 14, 7, 8, 14, 8]}
+                        fill="#2455d6"
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                      <Rect
+                        x={12}
+                        y={12}
+                        width={98}
+                        height={20}
+                        fill="#2455d6"
+                        cornerRadius={4}
+                      />
+                      <Text
+                        x={18}
+                        y={16}
+                        text="Sarah · sample"
+                        fontSize={10.5}
+                        fill="#ffffff"
+                        fontStyle="bold"
+                      />
+                    </Group>
+                  )}
                   {/* Live Cursors */}
                   {Object.values(cursors).map((c) => (
                     <Group key={c.username} x={c.x} y={c.y}>
@@ -1900,380 +2609,187 @@ const handleSendMessage = async (text: string) => {
                   ))}
                 </Layer>
               </Stage>
+              {editing && editorStyle && (
+                <textarea
+                  className={`canvas-text-editor ${editorStyle.sticky ? "sticky" : ""}`}
+                  style={editorStyle.style}
+                  autoFocus
+                  value={editing.value}
+                  aria-label={editorStyle.sticky ? "Sticky note text" : "Text"}
+                  placeholder={editorStyle.sticky ? "Write a note…" : "Type something…"}
+                  onChange={(e) =>
+                    setEditing((prev) =>
+                      prev ? { ...prev, value: e.target.value } : prev,
+                    )
+                  }
+                  onBlur={() => commitEditing()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      commitEditing(true);
+                    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      commitEditing();
+                    }
+                  }}
+                />
+              )}
+              {historyLoading && (
+                <div className="canvas-state-overlay" role="status">
+                  <Spinner size={18} />
+                  <strong>Loading canvas…</strong>
+                  <span>Restoring objects saved for this room.</span>
+                </div>
+              )}
+              {!historyLoading && shapes.length === 0 && (
+                <div className="canvas-empty-state">
+                  <span className="empty-icon">
+                    <Icon name="frame" size={24} />
+                  </span>
+                  <strong>
+                    {readOnly
+                      ? "Nothing on this canvas yet."
+                      : "A blank canvas. Start anywhere."}
+                  </strong>
+                  <p>
+                    {readOnly
+                      ? "When collaborators add content, it will appear here."
+                      : "Pick a tool, drop in an image, or start with a note."}
+                  </p>
+                  {!readOnly && (
+                    <div className="canvas-empty-actions">
+                      <Button icon="sticky" onClick={() => setTool("STICKY_NOTE")}>
+                        Sticky note
+                      </Button>
+                      <Button icon="rect" onClick={() => setTool("RECTANGLE")}>
+                        Shape
+                      </Button>
+                      <Button icon="pen" onClick={() => setTool("FREEHAND")}>
+                        Draw
+                      </Button>
+                      <Button icon="image" onClick={() => setLibraryOpen(true)}>
+                        Image
+                      </Button>
+                    </div>
+                  )}
+                  {!readOnly && (
+                    <span className="canvas-empty-template">
+                      <Icon name="template" size={13} />
+                      Start from a template
+                      <PlannedBadge />
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="canvas-bottom-bar">
-              <span>
+              <span className="canvas-status-text">
                 <Icon name="cursor" size={12} />
-                {multiIds.length > 1
-                  ? `${multiIds.length} objects selected`
-                  : selected
-                    ? selected.name || selected.type.toLowerCase()
-                    : `${shapes.length} objects · ${tool.toLowerCase().replace("_", " ")}`}
+                {statusText}
+              </span>
+              <span className="canvas-readout" aria-live="polite">
+                <span ref={readoutRef} />
               </span>
               <div>
                 <IconButton
                   icon="grid"
-                  label="Toggle grid"
+                  label="Toggle grid (Shift G)"
                   aria-pressed={grid}
                   onClick={() => setGrid(!grid)}
                 />
+                {!readOnly && (
+                  <IconButton
+                    icon="magnet"
+                    label="Snap to grid (Shift S)"
+                    aria-pressed={snap}
+                    className={snap ? "active" : ""}
+                    onClick={() => setSnap(!snap)}
+                  />
+                )}
                 <span className="toolbar-divider" />
                 <IconButton
                   icon="minus"
                   label="Zoom out"
-                  onClick={() => setStageScale((v) => Math.max(0.1, v / 1.2))}
+                  onClick={() => zoomTo(stageScale / 1.2)}
                 />
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setStageScale(1);
-                    setStagePos({ x: 0, y: 0 });
-                  }}
-                  title="Reset zoom and position"
+                <Dropdown
+                  className="zoom-menu"
+                  ariaLabel="Zoom options"
+                  label={<span>{Math.round(stageScale * 100)}%</span>}
                 >
-                  {Math.round(stageScale * 100)}%
-                </Button>
+                  <MenuItem icon="fit" shortcut="⇧1" onClick={() => fitToScreen()}>
+                    Fit to screen
+                  </MenuItem>
+                  <MenuItem
+                    icon="cursor"
+                    disabled={!selectionIds.length}
+                    onClick={() => fitToScreen(selectionIds)}
+                  >
+                    Zoom to selection
+                  </MenuItem>
+                  <MenuDivider />
+                  {[0.5, 1, 2].map((z) => (
+                    <MenuItem key={z} onClick={() => zoomTo(z)}>
+                      {z * 100}%
+                    </MenuItem>
+                  ))}
+                  <MenuDivider />
+                  <MenuItem icon="refresh" shortcut="⇧0" onClick={resetView}>
+                    Reset view
+                  </MenuItem>
+                </Dropdown>
                 <IconButton
                   icon="plus"
                   label="Zoom in"
-                  onClick={() => setStageScale((v) => Math.min(5, v * 1.2))}
+                  onClick={() => zoomTo(stageScale * 1.2)}
+                />
+                <IconButton
+                  icon="fit"
+                  label="Fit to screen (Shift 1)"
+                  onClick={() => fitToScreen()}
                 />
               </div>
             </div>
           </div>
           {showInspector && (
-            <aside className="canvas-inspector">
-              <div className="canvas-panel-heading">
-                <strong>Properties</strong>
-                <Icon name="settings" size={14} />
-              </div>
-              <div className="inspector-content">
-                {selected ? (
-                  <>
-                    <Field label="Layer name">
-                      <Input
-                        disabled={selected.locked}
-                        value={selected.name || selected.type.toLowerCase()}
-                        onChange={(e) => changeShape({ name: e.target.value })}
-                      />
-                    </Field>
-                    <div className="inspector-two-col">
-                      <Field label="X">
-                        <Input
-                          type="number"
-                          value={Math.round(selected.x || 0)}
-                          disabled={selected.locked}
-                          onChange={(e) =>
-                            changeShape({ x: Number(e.target.value) })
-                          }
-                        />
-                      </Field>
-                      <Field label="Y">
-                        <Input
-                          type="number"
-                          value={Math.round(selected.y || 0)}
-                          disabled={selected.locked}
-                          onChange={(e) =>
-                            changeShape({ y: Number(e.target.value) })
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label={selected.type === "CIRCLE" ? "Radius" : "Width"}
-                      >
-                        <Input
-                          type="number"
-                          min="1"
-                          disabled={
-                            selected.locked ||
-                            (selected.radiusX === undefined &&
-                              selected.width === undefined &&
-                              selected.radius === undefined)
-                          }
-                          value={Math.round(
-                            selected.radius ??
-                              (selected.radiusX !== undefined
-                                ? selected.radiusX * 2
-                                : (selected.width ?? 0)),
-                          )}
-                          onChange={(e) =>
-                            changeShape(
-                              selected.type === "CIRCLE"
-                                ? {
-                                    radius: Math.max(1, Number(e.target.value)),
-                                  }
-                                : selected.type === "ELLIPSE"
-                                  ? {
-                                      radiusX: Math.max(
-                                        1,
-                                        Number(e.target.value) / 2,
-                                      ),
-                                    }
-                                  : {
-                                      width: Math.max(
-                                        1,
-                                        Number(e.target.value),
-                                      ),
-                                    },
-                            )
-                          }
-                        />
-                      </Field>
-                      <Field label="Height">
-                        <Input
-                          type="number"
-                          min="1"
-                          disabled={
-                            selected.locked ||
-                            (selected.height === undefined &&
-                              selected.radiusY === undefined)
-                          }
-                          value={Math.round(
-                            selected.radiusY !== undefined
-                              ? selected.radiusY * 2
-                              : selected.height || 0,
-                          )}
-                          onChange={(e) =>
-                            changeShape(
-                              selected.type === "ELLIPSE"
-                                ? {
-                                    radiusY: Math.max(
-                                      1,
-                                      Number(e.target.value) / 2,
-                                    ),
-                                  }
-                                : {
-                                    height: Math.max(1, Number(e.target.value)),
-                                  },
-                            )
-                          }
-                        />
-                      </Field>
-                      <Field label="Rotation">
-                        <Input
-                          type="number"
-                          disabled={selected.locked}
-                          value={Math.round(selected.rotation || 0)}
-                          onChange={(e) =>
-                            changeShape({ rotation: Number(e.target.value) })
-                          }
-                        />
-                      </Field>
-                      <Field label="Opacity %">
-                        <Input
-                          type="number"
-                          min="0"
-                          max="100"
-                          disabled={selected.locked}
-                          value={Math.round((selected.opacity ?? 1) * 100)}
-                          onChange={(e) =>
-                            changeShape({
-                              opacity: Math.min(
-                                1,
-                                Math.max(0, Number(e.target.value) / 100),
-                              ),
-                            })
-                          }
-                        />
-                      </Field>
-                    </div>
-                    <div className="inspector-divider" />
-                    {selected.type !== "IMAGE" && (
-                      <Field
-                        label={
-                          selected.type === "TEXT"
-                            ? "Text color"
-                            : "Stroke color"
-                        }
-                      >
-                        <div className="inspector-color">
-                          <Input
-                            type="color"
-                            value={
-                              selected.color.startsWith("#")
-                                ? selected.color.slice(0, 7)
-                                : "#20221f"
-                            }
-                            disabled={selected.locked}
-                            onChange={(e) =>
-                              changeShape({ color: e.target.value })
-                            }
-                          />
-                          <span>{selected.color}</span>
-                        </div>
-                      </Field>
-                    )}
-                    {["RECTANGLE", "CIRCLE", "ELLIPSE", "STICKY_NOTE"].includes(
-                      selected.type,
-                    ) && (
-                      <Field label="Fill">
-                        <div className="inspector-color">
-                          <Input
-                            type="color"
-                            disabled={selected.locked}
-                            value={(selected.fill || selected.color).slice(
-                              0,
-                              7,
-                            )}
-                            onChange={(e) =>
-                              changeShape({ fill: e.target.value })
-                            }
-                          />
-                          <span>{selected.fill || "Default fill"}</span>
-                        </div>
-                      </Field>
-                    )}
-                    {selected.type !== "IMAGE" && selected.type !== "TEXT" && (
-                      <Field label="Stroke width">
-                        <Input
-                          type="number"
-                          min="0"
-                          max="40"
-                          disabled={selected.locked}
-                          value={selected.strokeWidth ?? 1}
-                          onChange={(e) =>
-                            changeShape({ strokeWidth: Number(e.target.value) })
-                          }
-                        />
-                      </Field>
-                    )}
-                    {(selected.type === "TEXT" ||
-                      selected.type === "STICKY_NOTE") && (
-                      <Field label="Content">
-                        <Textarea
-                          rows={4}
-                          disabled={selected.locked}
-                          value={selected.text || ""}
-                          onChange={(e) =>
-                            changeShape({ text: e.target.value })
-                          }
-                        />
-                      </Field>
-                    )}
-                    {selected.type === "TEXT" && (
-                      <Field label="Font size">
-                        <Input
-                          type="number"
-                          min="6"
-                          max="300"
-                          value={selected.fontSize || 18}
-                          disabled={selected.locked}
-                          onChange={(e) =>
-                            changeShape({
-                              fontSize: Math.max(6, Number(e.target.value)),
-                            })
-                          }
-                        />
-                      </Field>
-                    )}
-                    <div className="inspector-divider" />
-                    <span className="eyebrow">ARRANGE</span>
-                    <div className="inspector-arrange">
-                      <Button icon="layers" onClick={() => reorder(1)}>
-                        Forward
-                      </Button>
-                      <Button icon="layers" onClick={() => reorder(-1)}>
-                        Backward
-                      </Button>
-                      <Button
-                        icon="align"
-                        disabled={multiIds.length < 2}
-                        onClick={alignSelection}
-                      >
-                        Align left
-                      </Button>
-                      <Button icon="copy" onClick={duplicateSelection}>
-                        Duplicate
-                      </Button>
-                    </div>
-                    <Button
-                      icon="trash"
-                      variant="ghost"
-                      disabled={selected.locked}
-                      onClick={deleteSelection}
-                    >
-                      Delete selected
-                    </Button>
-                    {selected.groupId && <Badge>Grouped objects</Badge>}
-                    {selected.kind === "connector" && (
-                      <p className="inspector-hint">
-                        Manual connector. Automatic attachment to objects is not
-                        implemented.
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <span className="inspector-empty-icon">
-                      <Icon name="cursor" size={25} />
-                    </span>
-                    <strong className="inspector-empty-title">
-                      A little room to create.
-                    </strong>
-                    <p className="inspector-hint">
-                      Select an object to adjust its properties, or choose a
-                      tool to begin.
-                    </p>
-                    <div className="inspector-divider" />
-                    <Field label="Drawing color">
-                      <div className="inspector-color">
-                        <Input
-                          type="color"
-                          value={color}
-                          onChange={(e) => setColor(e.target.value)}
-                        />
-                        <span>{color.toUpperCase()}</span>
-                      </div>
-                    </Field>
-                    <Field label="Stroke width">
-                      <Input
-                        type="range"
-                        min="1"
-                        max="20"
-                        value={strokeWidth}
-                        onChange={(e) => setStrokeWidth(Number(e.target.value))}
-                      />
-                      <span className="inspector-hint">{strokeWidth} px</span>
-                    </Field>
-                    <div className="inspector-divider" />
-                    <p className="inspector-hint">
-                      Space to pan
-                      <br />
-                      Scroll to zoom
-                      <br />V to select
-                      <br />
-                      Shift + click for multi-select
-                      <br />
-                      Ctrl / ⌘ Z to undo
-                    </p>
-                    <Button
-                      variant="ghost"
-                      icon="trash"
-                      disabled={!shapes.length}
-                      onClick={() => setClearOpen(true)}
-                    >
-                      Clear canvas
-                    </Button>
-                  </>
-                )}
-                <div className="inspector-integration-note">
-                  <Icon name={demo ? "info" : "shield"} size={13} />
-                  <p>
-                    {demo
-                      ? "Demo canvas. All drawing is local to this browser session."
-                      : "Drawing events use your existing STOMP persistence. Server receipt is not a database-save guarantee."}
-                  </p>
-                </div>
-              </div>
-            </aside>
+            <CanvasInspector
+              selected={multiIds.length > 1 ? undefined : selected}
+              multiCount={multiIds.length}
+              readOnly={readOnly}
+              onChange={(patch) => changeShape(patch)}
+              onAlign={alignSelection}
+              onReorder={reorder}
+              onDuplicate={duplicateSelection}
+              onDelete={deleteSelection}
+              onGroup={groupSelection}
+              onUngroup={ungroupSelection}
+              canGroup={canGroup}
+              canUngroup={canUngroup}
+              color={color}
+              setColor={setColor}
+              strokeWidth={strokeWidth}
+              setStrokeWidth={setStrokeWidth}
+              noteColor={noteColor}
+              setNoteColor={setNoteColor}
+              grid={grid}
+              setGrid={setGrid}
+              snap={snap}
+              setSnap={setSnap}
+              shapesCount={shapes.length}
+              onClear={() => setClearOpen(true)}
+              demo={demo}
+              onClose={() => setShowInspector(false)}
+            />
           )}
         </div>
       </div>
       {clearOpen && (
         <Confirm
           title="Clear this canvas?"
-          description="Every object will be removed. In live mode each removal is sent through the existing drawing channel."
+          description="Every object will be removed. In live mode each removal is sent through the existing drawing channel. You can undo this in the current session."
+          confirmLabel="Clear canvas"
           onClose={() => setClearOpen(false)}
           onConfirm={() => {
             recordHistory();
@@ -2285,51 +2801,11 @@ const handleSendMessage = async (text: string) => {
           }}
         />
       )}
-      {textDialog && (
-        <Modal
-          title={textDialog.type === "TEXT" ? "Add text" : "Add a sticky note"}
-          onClose={() => setTextDialog(null)}
-        >
-          <form
-            className="form-stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const shape: Shape = {
-                id: `shape-${crypto.randomUUID()}`,
-                type: textDialog.type,
-                x: textDialog.x,
-                y: textDialog.y,
-                text: textValue,
-                width: textDialog.type === "STICKY_NOTE" ? 180 : undefined,
-                height: textDialog.type === "STICKY_NOTE" ? 160 : undefined,
-                color: textDialog.type === "STICKY_NOTE" ? "#e8ebcc" : color,
-              };
-              setShapes((prev) => [...prev, shape]);
-              broadcastEvent(shape.type, shape);
-              setTextDialog(null);
-              setSelectedId(shape.id);
-              setTool("SELECT");
-            }}
-          >
-            <Textarea
-              autoFocus
-              required
-              value={textValue}
-              onChange={(e) => setTextValue(e.target.value)}
-              placeholder="A thought worth keeping…"
-              rows={4}
-              aria-label="Object text"
-            />
-            <Button variant="primary" type="submit">
-              Add to canvas
-            </Button>
-          </form>
-        </Modal>
-      )}
       {libraryOpen && (
         <Modal
           title="Insert from media library"
           onClose={() => setLibraryOpen(false)}
+          wide
         >
           <div className="canvas-library">
             {assets
@@ -2379,7 +2855,7 @@ const handleSendMessage = async (text: string) => {
                   await navigator.clipboard.writeText(window.location.href);
                   toast("Room link copied.");
                 } catch {
-                  toast("Select and copy the room link above.");
+                  toast("Select and copy the room link above.", "info");
                 }
               }}
             >
@@ -2388,6 +2864,188 @@ const handleSendMessage = async (text: string) => {
           </div>
         </Modal>
       )}
+      {menu &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            className="context-menu canvas-context-menu"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 250),
+              top: Math.max(
+                8,
+                Math.min(menu.y, window.innerHeight - (menuTarget ? 440 : 300)),
+              ),
+            }}
+          >
+            {menuTarget ? (
+              <>
+                <span className="menu-label">
+                  {selectionIds.length > 1
+                    ? `${selectionIds.length} OBJECTS`
+                    : shapeLabel(menuTarget).toUpperCase()}
+                </span>
+                {!readOnly &&
+                  (menuTarget.type === "TEXT" ||
+                    menuTarget.type === "STICKY_NOTE") &&
+                  selectionIds.length <= 1 && (
+                    <MenuItem
+                      icon="edit"
+                      shortcut="↵"
+                      onClick={runMenu(() => startEditing(menuTarget))}
+                    >
+                      Edit text
+                    </MenuItem>
+                  )}
+                {!readOnly && (
+                  <MenuItem
+                    icon="copy"
+                    shortcut="⌘D"
+                    onClick={runMenu(duplicateSelection)}
+                  >
+                    Duplicate
+                  </MenuItem>
+                )}
+                <MenuItem
+                  icon="fit"
+                  onClick={runMenu(() => fitToScreen(selectionIds))}
+                >
+                  Zoom to selection
+                </MenuItem>
+                {!readOnly && (
+                  <>
+                    <MenuDivider />
+                    <MenuItem
+                      icon="bring-front"
+                      shortcut="⇧]"
+                      onClick={runMenu(() => reorder("front"))}
+                    >
+                      Bring to front
+                    </MenuItem>
+                    <MenuItem
+                      icon="arrow-up"
+                      shortcut="]"
+                      onClick={runMenu(() => reorder("forward"))}
+                    >
+                      Bring forward
+                    </MenuItem>
+                    <MenuItem
+                      icon="arrow-down"
+                      shortcut="["
+                      onClick={runMenu(() => reorder("backward"))}
+                    >
+                      Send backward
+                    </MenuItem>
+                    <MenuItem
+                      icon="send-back"
+                      shortcut="⇧["
+                      onClick={runMenu(() => reorder("back"))}
+                    >
+                      Send to back
+                    </MenuItem>
+                    <MenuDivider />
+                    {canGroup && (
+                      <MenuItem
+                        icon="group"
+                        shortcut="⌘G"
+                        onClick={runMenu(groupSelection)}
+                      >
+                        Group selection
+                      </MenuItem>
+                    )}
+                    {canUngroup && (
+                      <MenuItem
+                        icon="ungroup"
+                        shortcut="⇧⌘G"
+                        onClick={runMenu(ungroupSelection)}
+                      >
+                        Ungroup
+                      </MenuItem>
+                    )}
+                    <MenuItem
+                      icon={menuTarget.locked ? "unlock" : "lock"}
+                      onClick={runMenu(() => toggleSelection("locked"))}
+                    >
+                      {menuTarget.locked ? "Unlock" : "Lock"}
+                    </MenuItem>
+                    <MenuItem
+                      icon="eyeoff"
+                      onClick={runMenu(() => toggleSelection("hidden"))}
+                    >
+                      Hide
+                    </MenuItem>
+                    <MenuDivider />
+                    <MenuItem
+                      icon="trash"
+                      danger
+                      shortcut="⌫"
+                      disabled={menuTarget.locked}
+                      onClick={runMenu(deleteSelection)}
+                    >
+                      Delete
+                    </MenuItem>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <span className="menu-label">CANVAS</span>
+                {!readOnly && (
+                  <>
+                    <MenuItem
+                      icon="sticky"
+                      onClick={runMenu(() => addStickyAt(menu.point))}
+                    >
+                      Add sticky note here
+                    </MenuItem>
+                    <MenuItem
+                      icon="cursor"
+                      shortcut="⌘A"
+                      disabled={!shapes.length}
+                      onClick={runMenu(selectAll)}
+                    >
+                      Select all
+                    </MenuItem>
+                    <MenuDivider />
+                  </>
+                )}
+                <MenuItem
+                  icon="fit"
+                  shortcut="⇧1"
+                  onClick={runMenu(() => fitToScreen())}
+                >
+                  Fit to screen
+                </MenuItem>
+                <MenuItem icon="refresh" shortcut="⇧0" onClick={runMenu(resetView)}>
+                  Reset view
+                </MenuItem>
+                <MenuItem
+                  icon="grid"
+                  shortcut="⇧G"
+                  onClick={runMenu(() => setGrid(!grid))}
+                >
+                  {grid ? "Hide grid" : "Show grid"}
+                </MenuItem>
+                {!readOnly && (
+                  <>
+                    <MenuItem
+                      icon="magnet"
+                      shortcut="⇧S"
+                      onClick={runMenu(() => setSnap(!snap))}
+                    >
+                      {snap ? "Turn off snapping" : "Snap to grid"}
+                    </MenuItem>
+                    <MenuDivider />
+                    <MenuItem icon="template" disabled badge={<PlannedBadge />}>
+                      Insert template
+                    </MenuItem>
+                  </>
+                )}
+              </>
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };

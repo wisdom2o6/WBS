@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
   Avatar,
-  Badge,
   Button,
   Confirm,
   EmptyState,
@@ -14,25 +14,62 @@ import {
   Modal,
   Notice,
   Select,
+  useToast,
 } from "../components/ui";
+import {
+  PermissionNote,
+  RoleBadge,
+  SearchField,
+  roleLabel,
+} from "../components/patterns";
+import { roleDescriptions } from "../services/permissions";
 import { Icon } from "../components/Icon";
 import { errorMessage } from "../services/workspace";
 import type { Member } from "../types/workspace";
 
 export function Members() {
-  const { members, setMembers, addMember, demo, canManage, workspace } =
-    useWorkspace();
+  const {
+    members,
+    setMembers,
+    addMember,
+    demo,
+    can,
+    role,
+    workspace,
+  } = useWorkspace();
+  const { user } = useAuth();
+  const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState("");
-  const [inviting, setInviting] = useState(false);
+  const [roleFilter, setRoleFilter] = useState("ALL");
+  const [inviting, setInviting] = useState(params.has("invite"));
   const [email, setEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<Member["role"]>("MEMBER");
   const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<Member | null>(null);
-  const filtered = members.filter((m) =>
-    `${m.fullName} ${m.email}`.toLowerCase().includes(query.toLowerCase()),
+  const toast = useToast();
+  const me = demo ? "alex" : user?.username;
+  const group = (r: Member["role"]) =>
+    r === "ADMIN" ? "OWNER" : r === "EDITOR" ? "MEMBER" : r;
+  const filtered = members.filter(
+    (m) =>
+      `${m.fullName} ${m.email} ${m.username}`
+        .toLowerCase()
+        .includes(query.toLowerCase()) &&
+      (roleFilter === "ALL" || group(m.role) === roleFilter),
   );
+  const count = (r: string) =>
+    r === "ALL" ? members.length : members.filter((m) => group(m.role) === r).length;
+  const closeInvite = () => {
+    setInviting(false);
+    setEmail("");
+    setError("");
+    setEmailError("");
+    if (params.has("invite")) setParams({});
+  };
   return (
-    <div className="page">
+    <div className="page members-page">
       <div className="page-heading">
         <div>
           <div className="eyebrow">GREAT WORK IS A TEAM EFFORT</div>
@@ -44,108 +81,209 @@ export function Members() {
             is.
           </p>
         </div>
-        <Button
-          variant="primary"
-          icon="plus"
-          disabled={!canManage || !workspace}
-          onClick={() => setInviting(true)}
-        >
-          {demo ? "Add sample member" : "Add existing user"}
-        </Button>
+        {can.manageMembers && workspace && (
+          <Button
+            variant="primary"
+            icon="plus"
+            onClick={() => setInviting(true)}
+          >
+            {demo ? "Invite member" : "Add existing user"}
+          </Button>
+        )}
       </div>
-      <Notice>
-        {demo
-          ? "Sample members. Role changes and removals affect this demo session only; no invitations are sent."
-          : "The current backend supports adding registered users and reading Owner, Admin, and Member roles. Role updates, removal, invitation status, and last-active tracking are not yet available."}
-      </Notice>
-      <div className="list-toolbar">
-        <div className="search-input">
-          <Icon name="search" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people…"
-            aria-label="Search members"
-          />
-        </div>
-        <span className="muted">{members.length} members</span>
-      </div>
-      <div className="members-table table-panel">
-        <div className="members-table-head">
-          <span>MEMBER</span>
-          <span>ROLE</span>
-          <span>STATUS</span>
-          <span>LAST ACTIVE</span>
-          <span />
-        </div>
-        {filtered.map((m, i) => (
-          <div className="members-table-row" key={m.userId}>
-            <div className="member-name">
-              <Avatar name={m.fullName} tone={i} />
-              <span>
-                <strong>{m.fullName}</strong>
-                <small>{m.email}</small>
-              </span>
-            </div>
-            {demo && m.role !== "OWNER" ? (
-              <Select
-                aria-label={`Role for ${m.fullName}`}
-                value={m.role}
-                onChange={(e) =>
-                  setMembers((prev) =>
-                    prev.map((member) =>
-                      member.userId === m.userId
-                        ? { ...member, role: e.target.value as Member["role"] }
-                        : member,
-                    ),
-                  )
-                }
-              >
-                <option value="ADMIN">Admin</option>
-                <option value="EDITOR">Editor</option>
-                <option value="VIEWER">Viewer</option>
-              </Select>
-            ) : (
-              <Badge>
-                {m.role === "MEMBER" ? "Member" : m.role.toLowerCase()}
-              </Badge>
-            )}
-            <span className="member-status">
-              <i />
-              {demo ? "Sample member" : "Member"}
-            </span>
-            <span className="muted small-text">Not tracked</span>
-            <IconButton
-              icon="trash"
-              label={`Remove ${m.fullName}`}
-              disabled={!demo || m.role === "OWNER"}
-              onClick={() => setRemoving(m)}
-            />
-          </div>
-        ))}
-      </div>
-      {!filtered.length && (
-        <EmptyState
-          icon="users"
-          title="No members found"
-          description="Try another name or email address."
-        />
+      {can.manageMembers ? (
+        <Notice>
+          {demo
+            ? "Sample members. Invitations, role changes and removals affect this demo session only; no email is sent."
+            : "The current backend supports adding registered users with the Member role. Role changes, removal, invitation e-mail and joined dates are not yet returned by the API."}
+        </Notice>
+      ) : (
+        <PermissionNote role={role}>
+          Only workspace owners can invite, remove or change the role of
+          members. You can view who belongs to this workspace.
+        </PermissionNote>
       )}
-      {inviting && (
+      <div className="members-layout">
+        <div className="members-main">
+          <div className="list-toolbar">
+            <SearchField
+              value={query}
+              onChange={setQuery}
+              placeholder="Search by name or email…"
+              label="Search members"
+            />
+            <div className="segmented" role="tablist" aria-label="Filter by role">
+              {["ALL", "OWNER", "MEMBER", "VIEWER"].map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  role="tab"
+                  aria-selected={roleFilter === r}
+                  className={roleFilter === r ? "active" : ""}
+                  onClick={() => setRoleFilter(r)}
+                >
+                  {r === "ALL" ? "All" : roleLabel(r as Member["role"])}
+                  <span>{count(r)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="members-table table-panel">
+            <div className="members-table-head">
+              <span>MEMBER</span>
+              <span>ROLE</span>
+              <span>JOINED</span>
+              <span />
+            </div>
+            {filtered.map((m, i) => {
+              const self = m.username === me;
+              const editable =
+                can.manageMembers && demo && m.role !== "OWNER" && !self;
+              return (
+                <div className="members-table-row" key={m.userId}>
+                  <div className="member-name">
+                    <Avatar name={m.fullName} tone={i} />
+                    <span>
+                      <strong>
+                        {m.fullName}
+                        {self && <em className="you-tag">You</em>}
+                      </strong>
+                      <small>{m.email}</small>
+                    </span>
+                  </div>
+                  {editable ? (
+                    <Select
+                      aria-label={`Role for ${m.fullName}`}
+                      value={group(m.role)}
+                      onChange={(e) => {
+                        setMembers((prev) =>
+                          prev.map((member) =>
+                            member.userId === m.userId
+                              ? {
+                                  ...member,
+                                  role: e.target.value as Member["role"],
+                                }
+                              : member,
+                          ),
+                        );
+                        toast(
+                          `${m.fullName} is now ${roleLabel(e.target.value as Member["role"]).toLowerCase()}.`,
+                        );
+                      }}
+                    >
+                      <option value="MEMBER">Member</option>
+                      <option value="VIEWER">Viewer</option>
+                    </Select>
+                  ) : (
+                    <span
+                      title={
+                        can.manageMembers && !demo
+                          ? "Role changes are not supported by the current backend."
+                          : undefined
+                      }
+                    >
+                      <RoleBadge role={m.role} />
+                    </span>
+                  )}
+                  <span className="muted small-text">
+                    {m.joinedAt
+                      ? new Date(m.joinedAt).toLocaleDateString("en", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                        })
+                      : "—"}
+                  </span>
+                  {editable ? (
+                    <IconButton
+                      icon="trash"
+                      label={`Remove ${m.fullName}`}
+                      onClick={() => setRemoving(m)}
+                    />
+                  ) : (
+                    <span />
+                  )}
+                </div>
+              );
+            })}
+            {!filtered.length && (
+              <div className="members-empty">
+                <EmptyState
+                  icon="users"
+                  title="No members found"
+                  description="Try another name, email address or role."
+                  action={
+                    <Button
+                      onClick={() => {
+                        setQuery("");
+                        setRoleFilter("ALL");
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  }
+                />
+              </div>
+            )}
+          </div>
+        </div>
+        <aside className="roles-panel" aria-label="Roles and permissions">
+          <span className="eyebrow">ROLES & PERMISSIONS</span>
+          {(["OWNER", "MEMBER", "VIEWER"] as const).map((r) => (
+            <div
+              key={r}
+              className={`role-card ${group(role) === r ? "current" : ""}`}
+            >
+              <div>
+                <RoleBadge role={r} />
+                {group(role) === r && <small>Your role</small>}
+              </div>
+              <strong>{roleDescriptions[r].summary}</strong>
+              <ul>
+                {roleDescriptions[r].abilities.map((a) => (
+                  <li key={a} className={a.startsWith("Cannot") ? "denied" : ""}>
+                    <Icon name={a.startsWith("Cannot") ? "close" : "check"} size={12} />
+                    {a}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {!demo && (
+            <p className="muted small-text">
+              The backend also has an Admin role with owner-level management.
+            </p>
+          )}
+        </aside>
+      </div>
+      {inviting && can.manageMembers && (
         <Modal
-          title={demo ? "Add a sample member" : "Add an existing WBS user"}
-          onClose={() => setInviting(false)}
+          title={demo ? "Invite a member" : "Add an existing WBS user"}
+          onClose={closeInvite}
         >
           <form
             className="form-stack"
+            noValidate
             onSubmit={async (e) => {
               e.preventDefault();
+              const value = email.trim();
+              if (!value) {
+                setEmailError("Enter an email address.");
+                return;
+              }
+              if (demo && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+                setEmailError("Enter a valid email address.");
+                return;
+              }
+              if (members.some((m) => m.email === value || m.username === value)) {
+                setEmailError("This person is already a member.");
+                return;
+              }
               setBusy(true);
               setError("");
               try {
-                await addMember(email.trim());
-                setInviting(false);
-                setEmail("");
+                await addMember(value, demo ? inviteRole : "MEMBER");
+                closeInvite();
               } catch (err) {
                 setError(errorMessage(err));
               } finally {
@@ -153,24 +291,64 @@ export function Members() {
               }
             }}
           >
-            <Notice>
+            <p className="dialog-intro">
               {demo
-                ? "This adds a sample person locally. No invitation is sent."
-                : "Enter the email or username of an already registered user. The backend adds them with the Member role; it does not send an email."}
-            </Notice>
+                ? "Add a teammate to Studio North and choose what they can do."
+                : "Enter the username or email of someone who already has a WBS account."}
+            </p>
             {error && <Notice tone="error">{error}</Notice>}
-            <Field label={demo ? "Email address" : "Username or email"}>
+            <Field
+              label={demo ? "Email address" : "Username or email"}
+              error={emailError}
+            >
               <Input
-                required
+                autoFocus
                 type={demo ? "email" : "text"}
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                aria-invalid={!!emailError}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (emailError) setEmailError("");
+                }}
                 placeholder="teammate@company.com"
               />
             </Field>
+            <Field
+              label="Role"
+              hint={
+                demo
+                  ? roleDescriptions[inviteRole === "VIEWER" ? "VIEWER" : "MEMBER"].summary
+                  : "The backend adds new people as Member."
+              }
+            >
+              <div className="role-picker" role="radiogroup" aria-label="Role">
+                {(["MEMBER", "VIEWER"] as const).map((r) => (
+                  <button
+                    type="button"
+                    key={r}
+                    role="radio"
+                    aria-checked={inviteRole === r}
+                    disabled={!demo && r !== "MEMBER"}
+                    className={inviteRole === r ? "active" : ""}
+                    onClick={() => setInviteRole(r)}
+                  >
+                    <Icon name={r === "VIEWER" ? "eye" : "users"} size={15} />
+                    <span>
+                      <strong>{roleLabel(r)}</strong>
+                      <small>{roleDescriptions[r].summary}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </Field>
+            <Notice>
+              {demo
+                ? "No email is sent. The person is added to this demo session only."
+                : "The backend does not send an invitation email."}
+            </Notice>
             <div className="modal-actions">
-              <Button onClick={() => setInviting(false)}>Cancel</Button>
-              <Button type="submit" variant="primary" disabled={busy}>
+              <Button onClick={closeInvite}>Cancel</Button>
+              <Button type="submit" variant="primary" loading={busy}>
                 {busy ? "Adding…" : "Add member"}
               </Button>
             </div>
@@ -180,12 +358,14 @@ export function Members() {
       {removing && (
         <Confirm
           title={`Remove ${removing.fullName}?`}
-          description="This removes the sample member from this demo session only."
+          description={`${removing.fullName} will lose access to ${workspace?.name || "this workspace"}, its projects and rooms. In the demo this affects this session only.`}
+          confirmLabel="Remove member"
           onClose={() => setRemoving(null)}
           onConfirm={() => {
             setMembers((prev) =>
               prev.filter((m) => m.userId !== removing.userId),
             );
+            toast(`${removing.fullName} was removed.`);
             setRemoving(null);
           }}
         />

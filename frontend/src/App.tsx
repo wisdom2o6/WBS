@@ -41,6 +41,7 @@ const Activity = lazy(() =>
   import("./pages/WorkspacePages").then((m) => ({ default: m.ActivityFeed })),
 );
 const Settings = lazy(() => import("./pages/Settings"));
+const System = lazy(() => import("./pages/System"));
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { token } = useAuth();
   return token ? children : <Navigate to="/login" replace />;
@@ -50,7 +51,11 @@ function WorkspaceRoutes() {
   const { user } = useAuth();
   return (
     <WorkspaceProvider
-      key={pathname.startsWith("/demo") ? "demo" : user?.userId || "live"}
+      key={
+        pathname.startsWith("/demo")
+          ? "demo"
+          : user?.userId || user?.id || "live"
+      }
     >
       <WorkspaceLayout />
     </WorkspaceProvider>
@@ -125,6 +130,7 @@ function App() {
                   <Route path="notifications" element={<Notifications />} />
                   <Route path="activity" element={<Activity />} />
                   <Route path="settings/*" element={<Settings />} />
+                  <Route path="system" element={<System />} />
                 </Route>
               ))}
               <Route path="*" element={<Navigate to="/" replace />} />

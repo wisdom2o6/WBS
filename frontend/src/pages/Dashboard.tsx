@@ -8,13 +8,14 @@ import {
   Badge,
   Button,
   ContextMenu,
+  Dropdown,
   EmptyState,
   Heading,
-  Skeleton,
-  useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { ResourceDialog } from "../components/ResourceDialog";
+import { useResourceActions } from "../components/ResourceActions";
+import { LoadingState, RoleBadge } from "../components/patterns";
 import type { Project, Room } from "../types/workspace";
 import { getRecentRooms } from "../services/recentRooms";
 
@@ -108,93 +109,96 @@ export function RoomCard({
   room,
   project,
   index = 0,
+  showActions = false,
 }: {
   room: Room;
   project: Project;
   index?: number;
+  showActions?: boolean;
 }) {
   const { base, members, demo } = useWorkspace();
-  const navigate = useNavigate();
-  const toast = useToast();
+  const { items, dialogs } = useResourceActions("room", room);
+  const activity = room.lastActivity;
+  const people = members.slice(index % Math.max(1, members.length - 2), (index % Math.max(1, members.length - 2)) + 3);
   return (
-    <ContextMenu
-      actions={
-        <>
-          <Button
-            role="menuitem"
-            variant="ghost"
-            icon="frame"
-            onClick={() => navigate(`${base}/room/${room.id}`)}
-          >
-            Open canvas
-          </Button>
-          <Button
-            role="menuitem"
-            variant="ghost"
-            icon="chat"
-            onClick={() => navigate(`${base}/room/${room.id}/chat`)}
-          >
-            Open conversation
-          </Button>
-          <Button
-            role="menuitem"
-            variant="ghost"
-            icon="copy"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(
-                  `${window.location.origin}${base}/room/${room.id}`,
-                );
-                toast("Room link copied. Sharing does not grant access.");
-              } catch {
-                toast("Copy the room URL from your browser.");
-              }
-            }}
-          >
-            Copy room link
-          </Button>
-        </>
-      }
-    >
-      <Link to={`${base}/room/${room.id}`} className="room-card">
-        {demo ? (
-          <BoardPreview variant={index} />
-        ) : (
-          <div className="live-board-placeholder">
-            <Icon name="frame" size={32} />
-            <span>{room.name}</span>
-            <small>Open your shared canvas</small>
+    <div className="room-with-actions">
+      <ContextMenu actions={items}>
+        <Link to={`${base}/room/${room.id}`} className="room-card">
+          {demo ? (
+            <BoardPreview variant={index} />
+          ) : (
+            <div className="live-board-placeholder">
+              <Icon name="frame" size={32} />
+              <span>{room.name}</span>
+              <small>Open your shared canvas</small>
+            </div>
+          )}
+          <div className="room-card-info">
+            <div>
+              <strong>{room.name}</strong>
+              <span>{project.name}</span>
+            </div>
+            <Icon name="diagonal" size={17} />
           </div>
-        )}
-        <div className="room-card-info">
-          <div>
-            <strong>{room.name}</strong>
-            <span>{project.name}</span>
+          <p className="room-card-description">
+            {room.description || "A shared canvas for your next idea."}
+          </p>
+          <div className="room-card-footer">
+            <span className="room-card-activity">
+              <Icon name="clock" size={12} />
+              {activity
+                ? `${activity.actor.split(" ")[0]} · ${activity.time}`
+                : room.createdAt
+                  ? `Created ${new Date(room.createdAt).toLocaleDateString("en", { month: "short", day: "numeric" })}`
+                  : "No recent activity"}
+              {demo && index === 0 && (
+                <span className="subtle-online">
+                  <i />2 exploring
+                </span>
+              )}
+            </span>
+            <Avatars names={people.map((m) => m.fullName)} limit={3} />
           </div>
-          <Icon name="diagonal" size={17} />
+        </Link>
+      </ContextMenu>
+      {showActions && (
+        <div className="room-actions-overlay">
+          <Dropdown
+            className="resource-more"
+            ariaLabel={`${room.name} actions`}
+            label={<Icon name="more" />}
+          >
+            {items}
+          </Dropdown>
         </div>
-        <div className="room-card-footer">
-          <span>
-            <Icon name="frame" size={13} />
-            Canvas
-            {demo && index === 0 && (
-              <span className="subtle-online">
-                <i />2 exploring
-              </span>
-            )}
-          </span>
-          <Avatars
-            names={members.slice(index, index + 3).map((m) => m.fullName)}
-            limit={3}
-          />
-        </div>
-      </Link>
-    </ContextMenu>
+      )}
+      {dialogs}
+    </div>
   );
 }
+function shortDate(iso: string) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? iso
+    : date.toLocaleString("en", {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
 export const Dashboard = () => {
-  const { workspace, members, base, loading, documents, activity, demo } =
-    useWorkspace();
+  const {
+    workspace,
+    members,
+    base,
+    loading,
+    documents,
+    activity,
+    demo,
+    can,
+    role,
+  } = useWorkspace();
   const { user } = useAuth();
   const navigate = useNavigate();
   const [creating, setCreating] = useState<
@@ -211,9 +215,56 @@ export const Dashboard = () => {
       bi = recentIds.indexOf(b.room.id);
     return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
   });
+  const recentDocs = documents
+    .filter((d) => d.workspaceId === workspace?.id)
+    .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 3);
   const firstName = demo
     ? "Alex"
     : user?.fullName?.split(" ")[0] || user?.username || "there";
+  const location = (projectId?: string, roomId?: string) => {
+    const project = projects.find((p) => p.id === projectId);
+    const room = project?.rooms.find((r) => r.id === roomId);
+    return [project?.name, room?.name].filter(Boolean).join(" · ") ||
+      "Workspace document";
+  };
+  const quickActions = [
+    can.create && {
+      key: "canvas",
+      icon: "frame",
+      title: "Start a canvas",
+      detail: "Think outside the page",
+      onClick: () => setCreating(projects.length ? "room" : "project"),
+    },
+    can.create && {
+      key: "doc",
+      icon: "file",
+      title: "Write a document",
+      detail: "Give your ideas structure",
+      to: `${base}/documents?create=1`,
+    },
+    {
+      key: "media",
+      icon: "image",
+      title: can.create ? "Upload media" : "Browse media",
+      detail: "Keep references close",
+      to: `${base}/media`,
+    },
+    can.manageMembers && {
+      key: "invite",
+      icon: "users",
+      title: "Invite people",
+      detail: "Bring your team in",
+      to: `${base}/members?invite=1`,
+    },
+  ].filter(Boolean) as {
+    key: string;
+    icon: string;
+    title: string;
+    detail: string;
+    to?: string;
+    onClick?: () => void;
+  }[];
   return (
     <div className="page overview-page">
       <div className="page-heading">
@@ -227,16 +278,32 @@ export const Dashboard = () => {
           <p>Make space for your next great idea.</p>
         </div>
         <div className="page-heading-actions">
-          <Button icon="users" onClick={() => navigate(`${base}/members`)}>
-            Invite members
-          </Button>
           <Button
-            variant="primary"
-            icon="plus"
-            onClick={() => setCreating(workspace ? "project" : "workspace")}
+            variant="ghost"
+            icon="search"
+            className="overview-search"
+            onClick={() => window.dispatchEvent(new Event("wbs:search"))}
           >
-            {workspace ? "New project" : "New workspace"}
+            Search
+            <kbd>⌘ K</kbd>
           </Button>
+          {can.manageMembers && (
+            <Button
+              icon="users"
+              onClick={() => navigate(`${base}/members?invite=1`)}
+            >
+              Invite members
+            </Button>
+          )}
+          {(can.create || !workspace) && (
+            <Button
+              variant="primary"
+              icon="plus"
+              onClick={() => setCreating(workspace ? "project" : "workspace")}
+            >
+              {workspace ? "New project" : "New workspace"}
+            </Button>
+          )}
         </div>
       </div>
       <div className="workspace-summary">
@@ -245,31 +312,60 @@ export const Dashboard = () => {
             <Icon name="layers" size={24} />
           </span>
           <div>
-            <strong>{workspace?.name || "Welcome to WBS"}</strong>
+            <strong>
+              {workspace?.name || "Welcome to WBS"}
+              {workspace && <RoleBadge role={role} />}
+            </strong>
             <span>
               {workspace?.description ||
                 "Create a workspace to bring your ideas together."}
             </span>
+            {workspace && (
+              <span className="summary-links">
+                <Link to={`${base}/documents`}>
+                  <Icon name="file" size={12} />
+                  Shared documents
+                </Link>
+                <Link to={`${base}/members`}>
+                  <Icon name="users" size={12} />
+                  People
+                </Link>
+                {can.manageWorkspace && (
+                  <Link to={`${base}/settings?tab=Workspace`}>
+                    <Icon name="settings" size={12} />
+                    Workspace settings
+                  </Link>
+                )}
+              </span>
+            )}
           </div>
         </div>
-        <div className="summary-stat">
-          <strong>{projects.length.toString().padStart(2, "0")}</strong>
-          <span>Projects</span>
-        </div>
-        <div className="summary-stat">
-          <strong>{rooms.length.toString().padStart(2, "0")}</strong>
-          <span>Rooms</span>
-        </div>
-        <div className="summary-stat">
-          <strong>{members.length.toString().padStart(2, "0")}</strong>
-          <span>Members</span>
-        </div>
+        {loading ? (
+          <div className="summary-loading">
+            <LoadingState variant="stats" label="Loading workspace totals" />
+          </div>
+        ) : (
+          <>
+            <Link className="summary-stat" to={`${base}/projects`}>
+              <strong>{projects.length.toString().padStart(2, "0")}</strong>
+              <span>Projects</span>
+            </Link>
+            <Link className="summary-stat" to={`${base}/rooms`}>
+              <strong>{rooms.length.toString().padStart(2, "0")}</strong>
+              <span>Rooms</span>
+            </Link>
+            <Link className="summary-stat" to={`${base}/members`}>
+              <strong>{members.length.toString().padStart(2, "0")}</strong>
+              <span>Members</span>
+            </Link>
+          </>
+        )}
       </div>
       <section className="continue-section">
         <div className="section-heading">
           <div>
             <Heading>Pick up where you left off</Heading>
-            <p>Your ideas are right where you left them.</p>
+            <p>Recently opened rooms, right where you left them.</p>
           </div>
           <Link className="text-link" to={`${base}/rooms`}>
             All rooms
@@ -277,7 +373,7 @@ export const Dashboard = () => {
           </Link>
         </div>
         {loading ? (
-          <Skeleton />
+          <LoadingState variant="cards" label="Loading rooms" />
         ) : rooms.length ? (
           <div className="room-grid">
             {recentRooms.slice(0, 3).map(({ room, project }, i) => (
@@ -286,12 +382,24 @@ export const Dashboard = () => {
           </div>
         ) : (
           <EmptyState
+            icon="frame"
             title="A blank canvas. A fresh start."
-            description="Create your first project, then add a room to start creating together."
+            description={
+              can.create
+                ? "Create your first project, then add a room to start creating together."
+                : "Rooms shared with you will appear here."
+            }
             action={
-              <Button icon="plus" onClick={() => setCreating("project")}>
-                Create project
-              </Button>
+              can.create ? (
+                <Button
+                  icon="plus"
+                  onClick={() =>
+                    setCreating(projects.length ? "room" : "project")
+                  }
+                >
+                  {projects.length ? "Create room" : "Create project"}
+                </Button>
+              ) : undefined
             }
           />
         )}
@@ -313,6 +421,7 @@ export const Dashboard = () => {
               <span>CREATED</span>
               <span />
             </div>
+            {loading && <LoadingState variant="rows" label="Loading projects" />}
             {projects.slice(0, 4).map((p, i) => (
               <Link
                 className="project-table-row"
@@ -343,41 +452,88 @@ export const Dashboard = () => {
                 <Icon name="chevron" size={15} />
               </Link>
             ))}
-            {projects.length === 0 && (
+            {!loading && projects.length === 0 && (
               <div className="compact-empty">
                 Your projects will appear here.
               </div>
             )}
-            <Button
-              variant="ghost"
-              className="table-create"
-              icon="plus"
-              onClick={() => setCreating("project")}
-            >
-              Create a new project
-            </Button>
+            {can.create && (
+              <Button
+                variant="ghost"
+                className="table-create"
+                icon="plus"
+                onClick={() => setCreating("project")}
+              >
+                Create a new project
+              </Button>
+            )}
           </div>
-          <div className="quick-actions">
-            <Button variant="ghost" onClick={() => setCreating("room")}>
-              <span className="quick-icon">
-                <Icon name="frame" />
-              </span>
-              <span>
-                <strong>Start a canvas</strong>
-                <small>Think outside the page</small>
-              </span>
-              <Icon name="arrow" size={15} />
-            </Button>
-            <Link to={`${base}/documents?create=1`}>
-              <span className="quick-icon">
-                <Icon name="file" />
-              </span>
-              <span>
-                <strong>Write a document</strong>
-                <small>Give your ideas structure</small>
-              </span>
+          <div className="section-heading recent-docs-heading">
+            <Heading>Recently edited documents</Heading>
+            <Link className="text-link" to={`${base}/documents`}>
+              All documents
               <Icon name="arrow" size={15} />
             </Link>
+          </div>
+          <div className="recent-docs table-panel">
+            {recentDocs.map((d) => (
+              <Link
+                key={d.id}
+                className="recent-doc-row"
+                to={`${base}/documents/${d.id}`}
+              >
+                <span className="document-icon">
+                  <Icon name="file" size={18} />
+                </span>
+                <span className="recent-doc-copy">
+                  <strong>{d.title}</strong>
+                  <small>{location(d.projectId, d.roomId)}</small>
+                </span>
+                <span className="recent-doc-meta">
+                  <Avatar name={d.author} size="small" />
+                  <span>
+                    <small>{d.author.split(" ")[0]}</small>
+                    <time>{shortDate(d.updatedAt)}</time>
+                  </span>
+                </span>
+                <Icon name="chevron" size={15} />
+              </Link>
+            ))}
+            {!recentDocs.length && (
+              <div className="compact-empty recent-docs-empty">
+                <Icon name="file" size={16} />
+                {can.create
+                  ? "Documents you write will appear here."
+                  : "Documents shared with you will appear here."}
+              </div>
+            )}
+          </div>
+          <div className="quick-actions">
+            {quickActions.map((a) =>
+              a.to ? (
+                <Link key={a.key} to={a.to}>
+                  <span className="quick-icon">
+                    <Icon name={a.icon} />
+                  </span>
+                  <span>
+                    <strong>{a.title}</strong>
+                    <small>{a.detail}</small>
+                  </span>
+                  <Icon name="arrow" size={15} />
+                </Link>
+              ) : (
+                <Button key={a.key} variant="ghost" onClick={a.onClick}>
+                  <span className="quick-icon">
+                    <Icon name={a.icon} />
+                  </span>
+                  <span>
+                    <strong>{a.title}</strong>
+                    <small>{a.detail}</small>
+                  </span>
+                  <Icon name="arrow" size={15} />
+                </Button>
+              ),
+            )}
           </div>
         </section>
         <section className="activity-section">
@@ -392,7 +548,7 @@ export const Dashboard = () => {
             </Link>
           </div>
           <div className="activity-list">
-            {activity.slice(0, 4).map((a, i) => (
+            {activity.slice(0, 5).map((a, i) => (
               <Link
                 key={a.id}
                 className="activity-item"

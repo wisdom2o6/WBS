@@ -21,21 +21,36 @@ export function Button({
   variant = "secondary",
   className = "",
   icon,
+  loading = false,
   children,
+  disabled,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "ghost" | "danger";
   icon?: string;
+  /** Shows an inline spinner, disables the button and announces busy state. */
+  loading?: boolean;
 }) {
   return (
     <button
       type="button"
-      className={`btn btn-${variant} ${className}`}
+      className={`btn btn-${variant} ${loading ? "is-loading" : ""} ${className}`}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
       {...props}
     >
-      {icon && <Icon name={icon} size={16} />}
+      {loading ? <Spinner /> : icon && <Icon name={icon} size={16} />}
       {children}
     </button>
+  );
+}
+export function Spinner({ size = 14 }: { size?: number }) {
+  return (
+    <span
+      className="spinner"
+      style={{ width: size, height: size }}
+      aria-hidden="true"
+    />
   );
 }
 export function IconButton({
@@ -90,16 +105,25 @@ export function Field({
   label,
   children,
   hint,
+  error,
 }: {
   label: string;
   children: ReactNode;
   hint?: string;
+  error?: string;
 }) {
   return (
-    <label className="field">
+    <label className={`field ${error ? "field-error" : ""}`}>
       <span>{label}</span>
       {children}
-      {hint && <small>{hint}</small>}
+      {error ? (
+        <small className="field-error-text" role="alert">
+          <Icon name="alert" size={12} />
+          {error}
+        </small>
+      ) : (
+        hint && <small>{hint}</small>
+      )}
     </label>
   );
 }
@@ -305,9 +329,17 @@ export function Modal({
 export function Dropdown({
   label,
   children,
+  ariaLabel,
+  align = "right",
+  className = "",
+  menuClassName = "",
 }: {
   label: ReactNode;
   children: ReactNode;
+  ariaLabel?: string;
+  align?: "left" | "right";
+  className?: string;
+  menuClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -326,36 +358,53 @@ export function Dropdown({
     };
   }, []);
   return (
-    <div className="dropdown" ref={ref}>
+    <div className={`dropdown ${className}`} ref={ref}>
       <Button
         variant="ghost"
         className="dropdown-trigger"
         aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={ariaLabel}
+        title={ariaLabel}
         onClick={() => setOpen(!open)}
       >
         {label}
       </Button>
       {open && (
-        <div className="dropdown-menu" onClick={() => setOpen(false)}>
+        <div
+          className={`dropdown-menu align-${align} ${menuClassName}`}
+          role="menu"
+          onClick={() => setOpen(false)}
+        >
           {children}
         </div>
       )}
     </div>
   );
 }
-const ToastContext = createContext<(message: string, error?: boolean) => void>(
-  () => {},
-);
+export type ToastTone = "success" | "error" | "warning" | "info";
+const toastIcons: Record<ToastTone, string> = {
+  success: "check",
+  error: "alert",
+  warning: "alert",
+  info: "info",
+};
+// The second argument keeps the original boolean "error" signature working.
+const ToastContext = createContext<
+  (message: string, tone?: boolean | ToastTone) => void
+>(() => {});
 export const useToast = () => useContext(ToastContext);
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<
-    { id: string; message: string; error: boolean }[]
+    { id: string; message: string; tone: ToastTone }[]
   >([]);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
-  const notify = useCallback((message: string, error = false) => {
+  const notify = useCallback((message: string, tone: boolean | ToastTone = false) => {
     const id = crypto.randomUUID();
-    setToasts((prev) => [...prev, { id, message, error }]);
+    const resolved: ToastTone =
+      tone === true ? "error" : tone === false ? "success" : tone;
+    setToasts((prev) => [...prev, { id, message, tone: resolved }]);
     timers.current.push(
       setTimeout(
         () => setToasts((prev) => prev.filter((t) => t.id !== id)),
@@ -368,8 +417,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className="toast-stack" aria-live="polite">
         {toasts.map((t) => (
-          <div className={`toast ${t.error ? "error" : ""}`} key={t.id}>
-            <Icon name={t.error ? "info" : "check"} size={18} />
+          <div
+            className={`toast ${t.tone}`}
+            key={t.id}
+            role={t.tone === "error" ? "alert" : "status"}
+          >
+            <Icon name={toastIcons[t.tone]} size={18} />
             <span>{t.message}</span>
             <IconButton
               icon="close"
@@ -389,19 +442,60 @@ export function Confirm({
   description,
   onConfirm,
   onClose,
+  confirmLabel = "Delete",
+  tone = "danger",
+  requireText,
+  children,
 }: {
   title: string;
   description: string;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onClose: () => void;
+  confirmLabel?: string;
+  tone?: "danger" | "primary";
+  /** When set, the user must type this value before confirming. */
+  requireText?: string;
+  children?: ReactNode;
 }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const blocked = !!requireText && typed.trim() !== requireText;
   return (
     <Modal title={title} onClose={onClose}>
-      <p className="muted">{description}</p>
+      <div className="confirm-dialog">
+        {tone === "danger" && (
+          <span className="confirm-icon">
+            <Icon name="alert" size={18} />
+          </span>
+        )}
+        <p className="muted">{description}</p>
+      </div>
+      {children}
+      {requireText && (
+        <Field label={`Type “${requireText}” to confirm`}>
+          <Input
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            aria-label="Confirmation text"
+          />
+        </Field>
+      )}
       <div className="modal-actions">
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="danger" onClick={onConfirm}>
-          Delete
+        <Button
+          variant={tone}
+          disabled={blocked}
+          loading={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onConfirm();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {confirmLabel}
         </Button>
       </div>
     </Modal>

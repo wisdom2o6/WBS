@@ -3530,7 +3530,7 @@ kbd {
     font-size: 27px;
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 768px) {
   :root {
     --sidebar-width: 244px;
     --topbar-height: 58px;

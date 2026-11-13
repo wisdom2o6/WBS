@@ -21,6 +21,16 @@ import {
 } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { ResourceDialog } from "../components/ResourceDialog";
+import {
+  Breadcrumbs,
+  MenuDivider,
+  MenuItem,
+  NotificationItem,
+  PlannedBadge,
+  roleLabel,
+} from "../components/patterns";
+import { roleDescriptions } from "../services/permissions";
+import type { Role } from "../services/permissions";
 
 const navItems = [
   { path: "/workspace", label: "Overview", icon: "home" },
@@ -42,6 +52,9 @@ export function WorkspaceLayout() {
     tasks,
     error,
     refresh,
+    role,
+    setPreviewRole,
+    setNotifications,
   } = useWorkspace();
   const { user, logout } = useAuth();
   const location = useLocation();
@@ -67,8 +80,13 @@ export function WorkspaceLayout() {
       if (e.key === "Escape")
         setMobileState((prev) => ({ ...prev, open: false }));
     };
+    const openSearch = () => setSearchOpen(true);
     window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
+    window.addEventListener("wbs:search", openSearch);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("wbs:search", openSearch);
+    };
   }, []);
   const current =
     navItems.find((n) => location.pathname.includes(n.path))?.label ||
@@ -78,7 +96,38 @@ export function WorkspaceLayout() {
         ? "Settings"
         : location.pathname.includes("/notifications")
           ? "Notifications"
-          : "Project");
+          : location.pathname.includes("/activity")
+            ? "Activity"
+            : location.pathname.includes("/system")
+              ? "Design system"
+              : "Project");
+  const crumbs = useMemo(() => {
+    const items: { label: string; to?: string; icon?: string }[] = [
+      { label: workspace?.name || "Workspace", to: `${base}/workspace` },
+    ];
+    const path = location.pathname.replace(/^\/demo/, "");
+    const roomMatch = path.match(/^\/room\/([^/]+)/);
+    const projectMatch = path.match(/^\/projects\/([^/]+)/);
+    if (roomMatch) {
+      const project = workspace?.projects.find((p) =>
+        p.rooms.some((r) => r.id === roomMatch[1]),
+      );
+      const room = project?.rooms.find((r) => r.id === roomMatch[1]);
+      items.push({ label: "Projects", to: `${base}/projects` });
+      if (project)
+        items.push({ label: project.name, to: `${base}/projects/${project.id}` });
+      items.push({ label: room?.name || "Room" });
+    } else if (projectMatch) {
+      const project = workspace?.projects.find((p) => p.id === projectMatch[1]);
+      items.push({ label: "Projects", to: `${base}/projects` });
+      items.push({ label: project?.name || "Project" });
+    } else if (path.startsWith("/documents/")) {
+      items.push({ label: "Shared documents", to: `${base}/documents` });
+      items.push({ label: "Document" });
+    } else items.push({ label: current });
+    return items;
+  }, [location.pathname, workspace, base, current]);
+  const unread = notifications.filter((n) => !n.read).length;
   const displayName = demo
     ? "Alex Morgan"
     : user?.fullName || user?.username || "Your account";
@@ -165,6 +214,7 @@ export function WorkspaceLayout() {
               >
                 <Icon name={item.icon} size={18} />
                 <span>{item.label}</span>
+                {item.path === "/media" && <PlannedBadge label="Beta" />}
                 {item.path === "/tasks" &&
                   tasks.filter((t) => !t.done).length > 0 && (
                     <small className="nav-count">
@@ -275,16 +325,42 @@ export function WorkspaceLayout() {
             onClick={() => setMobile(!mobile)}
           />
           <div className="breadcrumb">
-            <span>{workspace?.name || "Workspace"}</span>
-            <Icon name="chevron" size={13} />
-            <strong>{current}</strong>
+            <Breadcrumbs items={crumbs} />
           </div>
           <div className="topbar-actions">
             {demo && (
-              <Link className="demo-tag" to="/login">
-                <span className="status-dot" />
-                Demo workspace
-              </Link>
+              <Dropdown
+                className="demo-role-switch"
+                ariaLabel="Demo workspace options"
+                label={
+                  <span className="demo-tag">
+                    <span className="status-dot" />
+                    Demo · {roleLabel(role)}
+                    <Icon name="down" size={12} />
+                  </span>
+                }
+              >
+                <span className="menu-label">PREVIEW PERMISSIONS AS</span>
+                {(["OWNER", "MEMBER", "VIEWER"] as Role[]).map((r) => (
+                  <MenuItem
+                    key={r}
+                    icon={r === "OWNER" ? "star" : r === "VIEWER" ? "eye" : "users"}
+                    onClick={() => setPreviewRole(r)}
+                    badge={role === r ? <Icon name="check" size={14} /> : undefined}
+                  >
+                    <span className="role-option">
+                      <strong>{roleLabel(r)}</strong>
+                      <small>
+                        {roleDescriptions[r as "OWNER"].summary}
+                      </small>
+                    </span>
+                  </MenuItem>
+                ))}
+                <MenuDivider />
+                <MenuItem icon="logout" onClick={() => navigate("/login")}>
+                  Sign in to WBS
+                </MenuItem>
+              </Dropdown>
             )}
             <Button
               variant="ghost"
@@ -295,14 +371,67 @@ export function WorkspaceLayout() {
               <span>Search anything…</span>
               <kbd>⌘ K</kbd>
             </Button>
-            <Link
-              className="notification-button"
-              aria-label={`Notifications, ${notifications.filter((n) => !n.read).length} unread`}
-              to={`${base}/notifications`}
+            <Dropdown
+              className="notification-popover"
+              menuClassName="notification-menu"
+              ariaLabel={`Notifications, ${unread} unread`}
+              label={
+                <span className="notification-button">
+                  <Icon name="bell" size={19} />
+                  {unread > 0 && <i />}
+                </span>
+              }
             >
-              <Icon name="bell" size={19} />
-              {notifications.some((n) => !n.read) && <i />}
-            </Link>
+              <div
+                className="notification-menu-head"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <strong>Notifications</strong>
+                {unread > 0 && <span className="tab-count">{unread}</span>}
+                <Button
+                  variant="ghost"
+                  disabled={!unread}
+                  onClick={() =>
+                    setNotifications((prev) =>
+                      prev.map((n) => ({ ...n, read: true })),
+                    )
+                  }
+                >
+                  Mark all read
+                </Button>
+              </div>
+              <div className="notification-menu-list">
+                {notifications.slice(0, 5).map((n) => (
+                  <NotificationItem
+                    key={n.id}
+                    compact
+                    {...n}
+                    to={`${base}${n.path}`}
+                    onOpen={() =>
+                      setNotifications((prev) =>
+                        prev.map((item) =>
+                          item.id === n.id ? { ...item, read: true } : item,
+                        ),
+                      )
+                    }
+                  />
+                ))}
+                {!notifications.length && (
+                  <p className="compact-empty">
+                    {demo
+                      ? "You’re all caught up."
+                      : "No notification service is connected yet."}
+                  </p>
+                )}
+              </div>
+              <Link
+                className="notification-menu-footer"
+                to={`${base}/notifications`}
+              >
+                View all notifications
+                <Icon name="arrow" size={14} />
+              </Link>
+            </Dropdown>
             <div className="topbar-divider" />
             <Dropdown label={<Avatar name={displayName} size="small" />}>
               <Button
@@ -363,6 +492,20 @@ export function WorkspaceLayout() {
               Use Ctrl / ⌘ K to search. In the canvas, hold Space to pan and
               scroll to zoom.
             </p>
+            <Link
+              className="help-link"
+              to={`${base}/system`}
+              onClick={() => setHelp(false)}
+            >
+              <Icon name="layers" size={16} />
+              <span>
+                <strong>Design system & module status</strong>
+                <small>
+                  Components, interaction states and what is implemented today.
+                </small>
+              </span>
+              <Icon name="arrow" size={14} />
+            </Link>
             <Button
               variant="primary"
               onClick={() => {

@@ -5,6 +5,8 @@ export interface Room {
   description?: string;
   createdAt?: string;
   createdByName?: string;
+  /** Human-readable last activity, when known (demo or session). */
+  lastActivity?: { actor: string; time: string };
 }
 export interface Project {
   id: string;
@@ -22,7 +24,7 @@ export interface Workspace {
   description: string;
   projects: Project[];
   ownerName?: string;
-  currentUserRole?: "OWNER" | "ADMIN" | "MEMBER";
+  currentUserRole?: Member["role"];
   createdAt?: string;
 }
 export interface Member {
@@ -31,6 +33,8 @@ export interface Member {
   fullName: string;
   email: string;
   role: "OWNER" | "ADMIN" | "MEMBER" | "EDITOR" | "VIEWER";
+  /** Not returned by the current backend DTO; shown when available. */
+  joinedAt?: string;
 }
 export interface Activity {
   id: string;
@@ -82,6 +86,8 @@ export interface Block {
   kind: BlockKind;
   text: string;
   checked?: boolean;
+  /** Code block language label. */
+  language?: string;
 }
 export interface Document {
   id: string;

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState } from "react";
 
 export interface User {
+  userId?: string;
   id?: string;
   username: string;
   email: string;

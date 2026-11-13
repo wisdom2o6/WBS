@@ -1000,7 +1000,7 @@
     gap: 10px;
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 768px) {
   .room-context-header {
     padding: 16px 20px;
     min-height: 82px;
