@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { GoogleLogin } from "@react-oauth/google";
+import { GOOGLE_CLIENT_ID } from "../../config/env";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../utils/api";
@@ -312,6 +314,54 @@ export function AuthScreen({
               <Icon name="arrow" size={17} />
             </Button>
           </form>
+          {(mode === "login" || registering) && GOOGLE_CLIENT_ID && (
+          <div
+            style={{
+              marginTop: 16,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <span className="muted" style={{ fontSize: 10 }}>
+              OR CONTINUE WITH
+            </span>
+            <GoogleLogin
+              width={350}
+              onSuccess={async (credentialResponse) => {
+                if (!credentialResponse.credential) {
+                  setError("Google did not return a valid credential.");
+                  return;
+                }
+                setError("");
+                setBusy(true);
+                try {
+                  const response = await api.post("/auth/google", {
+                    credential: credentialResponse.credential,
+                  });
+                  if (
+                    typeof response.data?.accessToken !== "string" ||
+                    !response.data.accessToken
+                  ) {
+                    throw new Error(
+                      "The server did not return a valid sign-in session.",
+                    );
+                  }
+                  login(response.data.accessToken, response.data, remember);
+                  navigate("/workspace");
+                } catch (err) {
+                  setError(errorMessage(err));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              onError={() => {
+                setError("Google sign-in was cancelled or failed.");
+              }}
+            />
+          </div>
+        )}
           {(mode === "forgot" || mode === "verify") && (
             <Link className="back-link" to="/login">
               Back to sign in

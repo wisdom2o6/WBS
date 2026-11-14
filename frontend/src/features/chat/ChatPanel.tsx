@@ -17,9 +17,7 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../components/Icon";
 import {
-  SecurityStatus,
   StatusIndicator,
-  connectionSecurity,
 } from "../../components/patterns";
 import { errorMessage } from "../../services/workspace";
 
@@ -134,7 +132,6 @@ export function ChatPanel({
   const toast = useToast();
 
   const live = demo || connected;
-  const security = connectionSecurity(API_ENDPOINT);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -402,11 +399,6 @@ export function ChatPanel({
             </div>
           ))}
         </div>
-        <div className="chat-security-stack">
-          <span className="eyebrow">CONNECTION SECURITY</span>
-          <SecurityStatus state={security} />
-          <SecurityStatus state="e2ee" e2eeVerified={!demo} />
-        </div>
         <div className="chat-module-status">
           <div>
             <strong>End-to-End Encrypted</strong>
@@ -453,7 +445,6 @@ export function ChatPanel({
               )}
             </span>
           </div>
-          <SecurityStatus state={security} compact />
           <div className="search-input">
             <Icon name="search" size={15} />
             <Input
@@ -565,7 +556,7 @@ export function ChatPanel({
                         <em className="message-edited">(edited)</em>
                       )}
                     </p>
-                    {!m.deleted &&
+{!m.deleted &&
                       m.attachment &&
                       (isImage ? (
                         <a
@@ -591,6 +582,14 @@ export function ChatPanel({
                           <Icon name="download" size={14} />
                         </DownloadLink>
                       ))}
+                    {!m.deleted && !m.attachment && m.attachmentUrl && (
+                      <span
+                        className="message-edited"
+                        style={{ display: "block", marginTop: 4 }}
+                      >
+                        [Tệp đính kèm đã bị xóa khỏi phòng]
+                      </span>
+                    )}
                     {!m.deleted && m.reactions?.length ? (
                       <div className="message-reactions">
                         {m.reactions.map((r) => {
@@ -611,32 +610,6 @@ export function ChatPanel({
                         })}
                       </div>
                     ) : null}
-                    {!m.deleted &&
-                      m.attachment &&
-                      (isImage ? (
-                        <a
-                          className="message-image"
-                          href={m.attachment.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <img src={m.attachment.url} alt={m.attachment.name} />
-                          <span>
-                            <Icon name="image" size={12} />
-                            {m.attachment.name}
-                          </span>
-                        </a>
-                      ) : (
-                        <DownloadLink
-                          className="message-attachment"
-                          href={m.attachment.url}
-                          download={m.attachment.name}
-                        >
-                          <Icon name="paperclip" size={15} />
-                          {m.attachment.name}
-                          <Icon name="download" size={14} />
-                        </DownloadLink>
-                      ))}
                     {!m.deleted && !m.attachment && m.attachmentUrl && (
                       <span
                         className="message-edited"

@@ -1,6 +1,7 @@
 package com.wisdom.wbs.controller;
 
 import com.wisdom.wbs.dto.AuthResponse;
+import com.wisdom.wbs.dto.GoogleLoginRequest;
 import com.wisdom.wbs.dto.LoginRequest;
 import com.wisdom.wbs.dto.RegisterRequest;
 import com.wisdom.wbs.service.AuthService;
@@ -24,5 +25,10 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
         return ResponseEntity.ok(authService.login(request));
+    }
+
+    @PostMapping("/google")
+    public ResponseEntity<AuthResponse> loginWithGoogle(@Valid @RequestBody GoogleLoginRequest request) {
+        return ResponseEntity.ok(authService.loginWithGoogle(request.getCredential()));
     }
 }

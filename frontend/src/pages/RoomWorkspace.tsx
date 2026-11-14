@@ -9,7 +9,7 @@ import {
   Skeleton,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { PlannedBadge, RoleBadge } from "../components/patterns";
+import { RoleBadge } from "../components/patterns";
 import { RoomCanvas } from "./RoomCanvas";
 import { recordRecentRoom } from "../services/recentRooms";
 const Documents = lazy(() => import("./Documents"));
