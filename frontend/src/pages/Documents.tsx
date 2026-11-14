@@ -40,8 +40,9 @@ import {
 import type { SyncState } from "../components/patterns";
 import type { Block, BlockKind, Document } from "../types/workspace";
 
-const API_BASE = "http://localhost:8080/api/v1";
-const WS_URL = "http://localhost:8080/ws-visual-workspace";
+const API_ORIGIN = (import.meta.env.VITE_API_URL || "http://localhost:8080").replace(/\/$/, "");
+const API_BASE = `${API_ORIGIN}/api/v1`; // giữ nguyên đuôi path cũ nếu khác
+const WS_URL = `${API_ORIGIN}/ws-visual-workspace`;
 const TAB_CLIENT_ID = crypto.randomUUID();
 const authHeaders = () => {
   const token =

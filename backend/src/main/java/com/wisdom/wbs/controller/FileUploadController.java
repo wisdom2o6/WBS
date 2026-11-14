@@ -16,6 +16,9 @@ public class FileUploadController {
 
     private final String UPLOAD_DIR = "uploads/";
 
+    @org.springframework.beans.factory.annotation.Value("${app.base-url}")
+    private String baseUrl;
+
     @PostMapping("/upload")
     public ResponseEntity uploadFile(@RequestParam("file") MultipartFile file) {
         if (file.isEmpty()) {
@@ -32,7 +35,7 @@ public class FileUploadController {
             Path filePath = Paths.get(UPLOAD_DIR + fileName);
             Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
 
-            String fileUrl = "http://localhost:8080/uploads/" + fileName;
+            String fileUrl = baseUrl + "/uploads/" + fileName;
             return ResponseEntity.ok(Map.of("url", fileUrl));
         } catch (IOException e) {
             e.printStackTrace();

@@ -181,7 +181,7 @@ async function toChatMessage(
 
 export const API =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:8080";
+  (import.meta.env.VITE_API_URL || "http://localhost:8080").replace(/\/$/, "");
 const PLEX = "IBM Plex Sans, sans-serif";
 
 // Component phụ render Ảnh trên Konva Canvas (supports stretch / contain / cover)

@@ -46,12 +46,13 @@ export interface ChatMessage {
 const REACTIONS = [
   { icon: "heart", label: "Love" },
   { icon: "check", label: "Agree" },
+  { icon: "thumbs-up", label: "Thumbs Up" },
   { icon: "star", label: "Important" },
 ];
 
 export const API_ENDPOINT =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:8080";
+  (import.meta.env.VITE_API_URL || "http://localhost:8080").replace(/\/$/, "");
 
 const now = () =>
   new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });

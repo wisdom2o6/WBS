@@ -30,6 +30,9 @@ public class RoomFileController {
     private final UserRepository userRepository;
     private final RoomRepository roomRepository;
 
+    @org.springframework.beans.factory.annotation.Value("${app.base-url}")
+    private String baseUrl;
+
     @GetMapping("/api/rooms/{roomId}/files")
     public ResponseEntity<List<RoomFile>> getRoomFiles(@PathVariable UUID roomId) {
         log.info("Tải danh sách file cho phòng: {}", roomId);
@@ -67,7 +70,7 @@ public class RoomFileController {
             File destFile = new File(dir, uniqueName);
             file.transferTo(destFile);
 
-            String fileUrl = "http://localhost:8080/uploads/" + uniqueName;
+            String fileUrl = baseUrl + "/uploads/" + uniqueName;
 
             String uploaderName = "Wisdom";
             if (principal != null) {
