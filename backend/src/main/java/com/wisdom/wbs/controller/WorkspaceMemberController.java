@@ -35,28 +35,43 @@ public class WorkspaceMemberController {
                 .toList();
     }
 
-    // 2. Mời thành viên qua Email (Chỉ OWNER)
+    // 2. Mời thành viên qua Email hoặc Username (Chỉ OWNER)
     @PostMapping
-    public ResponseEntity inviteMember(
+    public ResponseEntity<?> inviteMember(
             @PathVariable UUID workspaceId,
-            @RequestBody Map<String, String> body,
+            @RequestBody Map<String, Object> body,
             Authentication auth) {
         requireOwner(workspaceId, auth.getName());
 
-        String email = Optional.ofNullable(body.get("email"))
+        String identifier = Optional.ofNullable(body.get("email"))
+                .or(() -> Optional.ofNullable(body.get("usernameOrEmail")))
+                .or(() -> Optional.ofNullable(body.get("username")))
+                .or(() -> Optional.ofNullable(body.get("identifier")))
+                .map(Object::toString)
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email là bắt buộc"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email hoặc username là bắt buộc"));
 
-        UserRole role = UserRole.valueOf(
-                body.getOrDefault("role", "MEMBER").toUpperCase()
-        );
+        Object rawRole = body.get("role");
+        String roleStr = (rawRole != null && !rawRole.toString().isBlank())
+                ? rawRole.toString().trim().toUpperCase()
+                : "MEMBER";
+
+        UserRole role;
+        try {
+            role = UserRole.valueOf(roleStr);
+        } catch (IllegalArgumentException e) {
+            role = UserRole.MEMBER;
+        }
+
         if (role == UserRole.OWNER) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Không thể mời trực tiếp với quyền OWNER");
         }
 
-        User targetUser = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Không tìm thấy tài khoản với email: " + email));
+        User targetUser = (identifier.contains("@")
+                ? userRepository.findByEmail(identifier)
+                : userRepository.findByUsername(identifier).or(() -> userRepository.findByEmail(identifier)))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Không tìm thấy tài khoản: " + identifier));
 
         if (memberRepository.existsByIdWorkspaceIdAndIdUserId(workspaceId, targetUser.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Người dùng đã là thành viên của workspace");
