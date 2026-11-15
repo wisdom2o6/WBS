@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
@@ -27,6 +27,60 @@ import { Icon } from "../components/Icon";
 import { errorMessage } from "../services/workspace";
 import type { Member } from "../types/workspace";
 
+const API_BASE = (
+  import.meta.env.VITE_API_URL || "https://wbs-s6f8.onrender.com"
+).replace(/\/$/, "");
+
+function getAuthToken(): string {
+  const direct =
+    localStorage.getItem("token") ||
+    localStorage.getItem("accessToken") ||
+    localStorage.getItem("wbs_token") ||
+    localStorage.getItem("auth_token");
+  if (direct) return direct;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key) continue;
+    const val = localStorage.getItem(key) || "";
+    if (val.startsWith("eyJ")) return val;
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed?.token === "string") return parsed.token;
+      if (typeof parsed?.accessToken === "string") return parsed.accessToken;
+    } catch {
+      // ignore non-JSON storage values
+    }
+  }
+  return "";
+}
+
+async function projectMemberRequest<T = any>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const token = getAuthToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    let msg = `Lỗi ${res.status}`;
+    try {
+      const data = await res.json();
+      msg = data?.message || data?.error || msg;
+    } catch {
+      // ignore empty error body
+    }
+    throw new Error(msg);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
 export function Members() {
   const {
     members,
@@ -48,6 +102,7 @@ export function Members() {
   const [emailError, setEmailError] = useState("");
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<Member | null>(null);
+  const [assigningMember, setAssigningMember] = useState<Member | null>(null);
   const toast = useToast();
   const me = demo ? "alex" : user?.username;
   const group = (r: Member["role"]) =>
@@ -95,7 +150,7 @@ export function Members() {
         <Notice>
           {demo
             ? "Sample members. Invitations, role changes and removals affect this demo session only; no email is sent."
-            : "The current backend supports adding registered users with the Member role. Role changes, removal, invitation e-mail and joined dates are not yet returned by the API."}
+            : "Sau khi thêm thành viên vào Workspace, bấm nút Phân công ở từng thành viên để cấp hoặc hủy quyền hoạt động trong từng Project."}
         </Notice>
       ) : (
         <PermissionNote role={role}>
@@ -139,6 +194,8 @@ export function Members() {
               const self = m.username === me;
               const editable =
                 can.manageMembers && demo && m.role !== "OWNER" && !self;
+              const assignable =
+                can.manageMembers && !demo && m.role !== "OWNER" && !self && !!workspace;
               return (
                 <div className="members-table-row" key={m.userId}>
                   <div className="member-name">
@@ -175,13 +232,7 @@ export function Members() {
                       <option value="VIEWER">Viewer</option>
                     </Select>
                   ) : (
-                    <span
-                      title={
-                        can.manageMembers && !demo
-                          ? "Role changes are not supported by the current backend."
-                          : undefined
-                      }
-                    >
+                    <span>
                       <RoleBadge role={m.role} />
                     </span>
                   )}
@@ -200,6 +251,10 @@ export function Members() {
                       label={`Remove ${m.fullName}`}
                       onClick={() => setRemoving(m)}
                     />
+                  ) : assignable ? (
+                    <Button onClick={() => setAssigningMember(m)}>
+                      Phân công
+                    </Button>
                   ) : (
                     <span />
                   )}
@@ -249,11 +304,6 @@ export function Members() {
               </ul>
             </div>
           ))}
-          {!demo && (
-            <p className="muted small-text">
-              The backend also has an Admin role with owner-level management.
-            </p>
-          )}
         </aside>
       </div>
       {inviting && can.manageMembers && (
@@ -370,9 +420,329 @@ export function Members() {
           }}
         />
       )}
+      {assigningMember && (
+        <MemberProjectAssignModal
+          member={assigningMember}
+          projects={workspace?.projects || []}
+          onClose={() => setAssigningMember(null)}
+        />
+      )}
     </div>
   );
 }
+
+interface WorkspaceProjectSummary {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+function MemberProjectAssignModal({
+  member,
+  projects,
+  onClose,
+}: {
+  member: Member;
+  projects: WorkspaceProjectSummary[];
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [assignedIds, setAssignedIds] = useState<string[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [loadingInit, setLoadingInit] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadAssignments = async () => {
+    setLoadingInit(true);
+    setError("");
+    try {
+      const results = await Promise.all(
+        projects.map(async (p) => {
+          const list = await projectMemberRequest<{ userId: string }[]>(
+            `/api/v1/projects/${p.id}/members`,
+          );
+          return list.some((item) => item.userId === member.userId) ? p.id : null;
+        }),
+      );
+      setAssignedIds(results.filter((id): id is string => id !== null));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoadingInit(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAssignments();
+  }, [member.userId]);
+
+  const unassignedProjects = projects.filter(
+    (p) => !assignedIds.includes(p.id),
+  );
+  const assignedProjects = projects.filter((p) => assignedIds.includes(p.id));
+
+  const handleAssign = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProjectId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await projectMemberRequest(
+        `/api/v1/projects/${selectedProjectId}/members`,
+        {
+          method: "POST",
+          body: JSON.stringify({ userId: member.userId }),
+        },
+      );
+      const proj = projects.find((p) => p.id === selectedProjectId);
+      setAssignedIds((prev) => [...prev, selectedProjectId]);
+      setSelectedProjectId("");
+      toast(`Đã phân công ${member.fullName} vào ${proj?.name || "Project"}.`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUnassign = async (projectId: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await projectMemberRequest(
+        `/api/v1/projects/${projectId}/members/${member.userId}`,
+        { method: "DELETE" },
+      );
+      const proj = projects.find((p) => p.id === projectId);
+      setAssignedIds((prev) => prev.filter((id) => id !== projectId));
+      toast(`Đã hủy phân công khỏi ${proj?.name || "Project"}.`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title={`Phân công Project · ${member.fullName}`}
+      onClose={onClose}
+    >
+      <div className="form-stack">
+        <p className="dialog-intro">
+          Chọn Project để cấp quyền hoạt động cho <strong>{member.email}</strong>, hoặc bấm <strong>Hủy</strong> khi thành viên đã hoàn thành công việc.
+        </p>
+
+        {error && <Notice tone="error">{error}</Notice>}
+
+        <form onSubmit={handleAssign} className="form-stack">
+          <Field label="Thêm vào Project">
+            <div style={{ display: "flex", gap: "8px" }}>
+              <Select
+                aria-label="Chọn Project"
+                value={selectedProjectId}
+                disabled={busy || loadingInit || unassignedProjects.length === 0}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+              >
+                <option value="">
+                  {unassignedProjects.length === 0
+                    ? "Đã được phân công vào tất cả Project"
+                    : "-- Chọn Project --"}
+                </option>
+                {unassignedProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </Select>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!selectedProjectId || busy || loadingInit}
+              >
+                Phân công
+              </Button>
+            </div>
+          </Field>
+        </form>
+
+        <Field label={`Đang tham gia (${assignedProjects.length} Project)`}>
+          {loadingInit ? (
+            <p className="muted small-text">Đang tải danh sách phân công…</p>
+          ) : assignedProjects.length === 0 ? (
+            <Notice>
+              Thành viên này chưa được phân công vào Project nào nên chưa thấy phòng làm việc.
+            </Notice>
+          ) : (
+            <div className="task-list">
+              {assignedProjects.map((p) => (
+                <div className="task-row" key={p.id}>
+                  <div>
+                    <strong>{p.name}</strong>
+                    {p.description && <small>{p.description}</small>}
+                  </div>
+                  <Button
+                    disabled={busy}
+                    onClick={() => handleUnassign(p.id)}
+                  >
+                    Hủy
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Field>
+
+        <div className="modal-actions">
+          <Button onClick={onClose}>Đóng</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Modal tái sử dụng nếu muốn gắn nút "Phân công" trực tiếp trong trang chi tiết từng Project
+export function ProjectMembersModal({
+  projectId,
+  projectName,
+  onClose,
+}: {
+  projectId: string;
+  projectName: string;
+  onClose: () => void;
+}) {
+  const { members, can } = useWorkspace();
+  const toast = useToast();
+  const [assigned, setAssigned] = useState<
+    { userId: string; fullName: string; email: string }[]
+  >([]);
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadAssigned = async () => {
+    try {
+      const list = await projectMemberRequest<
+        { userId: string; fullName: string; email: string }[]
+      >(`/api/v1/projects/${projectId}/members`);
+      setAssigned(list);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  useEffect(() => {
+    loadAssigned();
+  }, [projectId]);
+
+  const available = members.filter(
+    (m) =>
+      m.role !== "OWNER" && !assigned.some((a) => a.userId === m.userId),
+  );
+
+  return (
+    <Modal title={`Thành viên Project · ${projectName}`} onClose={onClose}>
+      <div className="form-stack">
+        {error && <Notice tone="error">{error}</Notice>}
+
+        {can.manageMembers && (
+          <Field label="Phân công thành viên từ Workspace">
+            <div style={{ display: "flex", gap: "8px" }}>
+              <Select
+                aria-label="Chọn thành viên"
+                value={selectedUserId}
+                disabled={busy || available.length === 0}
+                onChange={(e) => setSelectedUserId(e.target.value)}
+              >
+                <option value="">-- Chọn thành viên --</option>
+                {available.map((m) => (
+                  <option key={m.userId} value={m.userId}>
+                    {m.fullName} ({m.email})
+                  </option>
+                ))}
+              </Select>
+              <Button
+                variant="primary"
+                disabled={!selectedUserId || busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    await projectMemberRequest(
+                      `/api/v1/projects/${projectId}/members`,
+                      {
+                        method: "POST",
+                        body: JSON.stringify({ userId: selectedUserId }),
+                      },
+                    );
+                    setSelectedUserId("");
+                    await loadAssigned();
+                    toast("Đã phân công thành viên vào Project.");
+                  } catch (err) {
+                    setError(errorMessage(err));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Phân công
+              </Button>
+            </div>
+          </Field>
+        )}
+
+        <Field label={`Đang hoạt động (${assigned.length})`}>
+          {assigned.length === 0 ? (
+            <Notice>Chưa có thành viên nào được phân công vào Project này.</Notice>
+          ) : (
+            <div className="task-list">
+              {assigned.map((a, i) => (
+                <div className="task-row" key={a.userId}>
+                  <div className="member-name">
+                    <Avatar name={a.fullName} tone={i} />
+                    <span>
+                      <strong>{a.fullName}</strong>
+                      <small>{a.email}</small>
+                    </span>
+                  </div>
+                  {can.manageMembers && (
+                    <Button
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        setError("");
+                        try {
+                          await projectMemberRequest(
+                            `/api/v1/projects/${projectId}/members/${a.userId}`,
+                            { method: "DELETE" },
+                          );
+                          await loadAssigned();
+                          toast(`Đã hủy phân công ${a.fullName}.`);
+                        } catch (err) {
+                          setError(errorMessage(err));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Hủy
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Field>
+
+        <div className="modal-actions">
+          <Button onClick={onClose}>Đóng</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export function Tasks() {
   const { tasks, setTasks, demo, workspace } = useWorkspace();
   const [filter, setFilter] = useState("all");
@@ -525,6 +895,7 @@ export function Tasks() {
     </div>
   );
 }
+
 export function Notifications() {
   const { notifications, setNotifications, demo, base } = useWorkspace();
   const [filter, setFilter] = useState("all");
@@ -630,6 +1001,7 @@ export function Notifications() {
     </div>
   );
 }
+
 export function ActivityFeed() {
   const { activity, demo, base } = useWorkspace();
   const [query, setQuery] = useState("");

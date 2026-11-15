@@ -46,8 +46,12 @@ public class WorkspaceController {
     }
 
     @GetMapping("/workspaces/{workspaceId}/projects")
-    public ResponseEntity<List<ProjectResponse>> getProjects(@PathVariable UUID workspaceId) {
-        return ResponseEntity.ok(workspaceService.getProjectsByWorkspace(workspaceId));
+    public ResponseEntity<List<ProjectResponse>> getProjects(
+            @PathVariable UUID workspaceId,
+            @AuthenticationPrincipal UserDetails userDetails) {
+        return ResponseEntity.ok(
+                workspaceService.getProjectsByWorkspace(workspaceId, userDetails.getUsername())
+        );
     }
 
     // ROOMS
@@ -60,8 +64,12 @@ public class WorkspaceController {
     }
 
     @GetMapping("/projects/{projectId}/rooms")
-    public ResponseEntity<List<RoomResponse>> getRooms(@PathVariable UUID projectId) {
-        return ResponseEntity.ok(workspaceService.getRoomsByProject(projectId));
+    public ResponseEntity<List<RoomResponse>> getRooms(
+            @PathVariable UUID projectId,
+            @AuthenticationPrincipal UserDetails userDetails) {
+        return ResponseEntity.ok(
+                workspaceService.getRoomsByProject(projectId, userDetails.getUsername())
+        );
     }
 
     @GetMapping("/rooms/{roomId}/canvas")
