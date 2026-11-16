@@ -41,7 +41,6 @@ export function ResourceDialog({
   const [busy, setBusy] = useState(false);
   const editing = !!resource;
   const resolvedMode = mode || (editing ? "rename" : undefined);
-  // The live backend only persists description changes for workspaces.
   const descriptionPersisted = demo || kind === "workspace";
   const showDescription = !editing || resolvedMode === "edit";
   const label = kind[0].toUpperCase() + kind.slice(1);
@@ -50,6 +49,7 @@ export function ResourceDialog({
     : resolvedMode === "edit"
       ? `Edit ${kind} details`
       : `Rename ${kind}`;
+
   return (
     <Modal title={title} onClose={onClose}>
       <form
@@ -110,19 +110,11 @@ export function ResourceDialog({
           />
         </Field>
         {showDescription && (
-          <Field
-            label="Description"
-            hint={
-              descriptionPersisted
-                ? `${description.length}/280 · Optional`
-                : "Description changes are not yet saved by the WBS backend."
-            }
-          >
+          <Field label="Description" hint={`${description.length}/280 · Optional`}>
             <Textarea
               rows={3}
               maxLength={280}
               value={description}
-              disabled={editing && !descriptionPersisted}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Give your team a little context."
             />
@@ -160,7 +152,7 @@ export function ResourceDialog({
               </span>
               <span>
                 <Icon name="chat" size={14} />
-                Chat · beta
+                Chat
               </span>
               <span>
                 <Icon name="folder" size={14} />

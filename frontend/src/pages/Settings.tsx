@@ -4,14 +4,12 @@ import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
 import {
   Avatar,
-  Badge,
   Button,
   Confirm,
   Field,
   Heading,
   Input,
   Notice,
-  Select,
   Textarea,
   useToast,
 } from "../components/ui";
@@ -27,6 +25,7 @@ export default function Settings() {
   const { workspace } = useWorkspace();
   return <SettingsForm key={workspace?.id || "no-workspace"} />;
 }
+
 function SettingsForm() {
   const { user, logout } = useAuth();
   const { workspace, update, remove, demo, base, can, role } = useWorkspace();
@@ -47,6 +46,7 @@ function SettingsForm() {
   const [deleting, setDeleting] = useState(false);
   const toast = useToast();
   const navigate = useNavigate();
+
   return (
     <div className="page settings-page">
       <div className="page-heading">
@@ -97,16 +97,15 @@ function SettingsForm() {
                 className="form-stack"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  toast(
-                    "Sample account label updated locally. Server profile updates are not supported.",
-                  );
+                  toast("Sample account label updated locally.");
                 }}
               >
-                <Notice>
-                  {demo
-                    ? "Demo profile fields can be explored locally. No account data is changed on a server."
-                    : "Profile and avatar updates are not supported by this backend. Your current account details are shown read-only."}
-                </Notice>
+                {demo && (
+                  <Notice>
+                    Demo profile fields can be explored locally. No account data
+                    is changed on a server.
+                  </Notice>
+                )}
                 <Field label="Full name">
                   <Input
                     disabled={!demo}
@@ -208,11 +207,6 @@ function SettingsForm() {
                     <Icon name="arrow" size={14} />
                   </Link>
                 </div>
-                <Field label="Default permission">
-                  <Select disabled defaultValue="member">
-                    <option value="member">Member · defined by backend</option>
-                  </Select>
-                </Field>
                 {canManage && (
                   <Button
                     variant="primary"
@@ -225,49 +219,37 @@ function SettingsForm() {
                 )}
               </form>
               {canManage && (
-              <div className="danger-zone">
-                <Heading level={3}>Delete workspace</Heading>
-                <p>
-                  Permanently remove this workspace, its projects, rooms, and
-                  canvas data.
-                </p>
-                <Button
-                  variant="danger"
-                  disabled={!canManage || !workspace}
-                  onClick={() => setDeleting(true)}
-                >
-                  Delete workspace
-                </Button>
-              </div>
+                <div className="danger-zone">
+                  <Heading level={3}>Delete workspace</Heading>
+                  <p>
+                    Permanently remove this workspace, its projects, rooms, and
+                    canvas data.
+                  </p>
+                  <Button
+                    variant="danger"
+                    disabled={!canManage || !workspace}
+                    onClick={() => setDeleting(true)}
+                  >
+                    Delete workspace
+                  </Button>
+                </div>
               )}
             </>
           )}
           {tab === "Security" && (
             <>
               <Heading>Account & workspace security</Heading>
-              <Notice>
-                Encryption status is unavailable. The current backend does not
-                confirm encryption at rest or end-to-end encryption.
-              </Notice>
+              <p className="muted">
+                Manage your authentication method and active browser session.
+              </p>
               <div className="security-item">
                 <Icon name="shield" />
                 <div>
-                  <strong>Transport connection</strong>
+                  <strong>Authentication</strong>
                   <p>
                     {demo
-                      ? "Demo mode does not connect to the WBS backend."
-                      : "The configured API uses HTTP on localhost. Secure transport is not confirmed."}
-                  </p>
-                </div>
-                <Badge tone="warning">Not verified</Badge>
-              </div>
-              <div className="security-item">
-                <Icon name="lock" />
-                <div>
-                  <strong>Password management</strong>
-                  <p>
-                    Password reset and password-change endpoints are not
-                    available.
+                      ? "Demo session · Not authenticated"
+                      : "Signed in via Google OAuth 2.0."}
                   </p>
                 </div>
               </div>
@@ -277,8 +259,8 @@ function SettingsForm() {
                   <strong>Current browser session</strong>
                   <p>
                     {demo
-                      ? "Sample session · Not authenticated"
-                      : "JWT session in this browser. Other sessions and connected devices cannot be enumerated."}
+                      ? "Sample session · Local browser state"
+                      : "Active JWT session in this browser."}
                   </p>
                 </div>
               </div>

@@ -75,6 +75,7 @@ function Section({
     </section>
   );
 }
+
 function Spec({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="ds-spec">
@@ -83,22 +84,24 @@ function Spec({ label, children }: { label: string; children: ReactNode }) {
     </div>
   );
 }
+
 const modules: {
   name: string;
-  status: "Live" | "Beta" | "Planned";
+  status: "Live" | "Planned";
   detail: string;
   next?: string;
 }[] = [
   { name: "Workspaces, projects, rooms", status: "Live", detail: "REST create, rename, delete and listing." },
-  { name: "Members", status: "Live", detail: "List members, add existing users.", next: "Role changes, removal and invitation email." },
+  { name: "Members & project assignments", status: "Live", detail: "Add workspace users and assign or revoke project access." },
   { name: "Canvas", status: "Live", detail: "STOMP drawing, cursors, REST restore. Layers, groups, align, distribute, snap, frames, inline text." },
   { name: "Canvas: table, smart connectors, templates", status: "Planned", detail: "Designed tool entry points only." },
-  { name: "Documents", status: "Beta", detail: "Persistent block documents with STOMP updates and Markdown export.", next: "Conflict-free collaborative editing." },
-  { name: "Room chat", status: "Beta", detail: "Encrypted live delivery and 50-message server history.", next: "Edits, reactions, attachments, typing." },
+  { name: "Documents", status: "Live", detail: "Persistent block documents with STOMP updates and Markdown export." },
+  { name: "Room chat", status: "Live", detail: "Encrypted live delivery and 50-message server history." },
   { name: "End-to-end encryption", status: "Live", detail: "AES-256-GCM room messages encrypted and decrypted in the browser." },
-  { name: "Media library", status: "Beta", detail: "Room files upload, index, restore and delete from PostgreSQL.", next: "Workspace indexing and storage quota." },
-  { name: "Notifications", status: "Planned", detail: "Sample notifications only; no delivery service." },
+  { name: "Media library", status: "Live", detail: "Room files upload, index, restore and delete from PostgreSQL." },
+  { name: "Notifications", status: "Planned", detail: "In-app activity and notification center." },
 ];
+
 const tokens = [
   ["--bg", "Background"],
   ["--surface", "Surface"],
@@ -113,6 +116,7 @@ const tokens = [
   ["--danger", "Danger"],
   ["--sidebar", "Sidebar"],
 ];
+
 const syncStates: SyncState[] = [
   "connected",
   "connecting",
@@ -135,6 +139,7 @@ export default function System() {
   const [demoValue, setDemoValue] = useState("");
   const [loading, setLoading] = useState(false);
   const project = workspace?.projects[0];
+
   return (
     <div className="page ds-page">
       <div className="page-heading">
@@ -161,7 +166,7 @@ export default function System() {
           <Section
             id="status"
             title="Module status"
-            description="What is implemented against the current backend, what runs as a beta, and what is designed but planned."
+            description="Overview of active modules and upcoming roadmap items."
           >
             <div className="ds-status table-panel">
               <div className="ds-status-head">
@@ -330,7 +335,7 @@ export default function System() {
               </Field>
               <Field label="Select · disabled">
                 <Select disabled defaultValue="member">
-                  <option value="member">Member · defined by backend</option>
+                  <option value="member">Member</option>
                 </Select>
               </Field>
             </div>
@@ -391,10 +396,8 @@ export default function System() {
               <RoleBadge role="VIEWER" />
               <span className="ds-row-label">Maturity</span>
               <Badge tone="success">Live</Badge>
-              <PlannedBadge label="Beta" />
               <PlannedBadge />
               <Badge>Local draft</Badge>
-              <Badge tone="warning">Not verified</Badge>
             </div>
             <div className="ds-row ds-wrap">
               <span className="ds-row-label">Sync</span>
@@ -408,12 +411,6 @@ export default function System() {
               <SecurityStatus state="setup" />
               <SecurityStatus state="e2ee" />
             </div>
-            <p className="ds-note">
-              <Icon name="shield" size={13} />
-              The end-to-end encrypted variant renders as active only when
-              passed a verified flag. WBS does not set it today, so it always
-              reads “not available”.
-            </p>
           </Section>
 
           <Section id="feedback" title="Feedback" description="Toasts, notices, loading and empty states.">
@@ -531,7 +528,6 @@ export default function System() {
               <span className="nav-item">
                 <Icon name="image" size={18} />
                 <span>Media library</span>
-                <PlannedBadge label="Beta" />
               </span>
               <span className="nav-item ds-collapsed" title="Collapsed">
                 <Icon name="users" size={18} />

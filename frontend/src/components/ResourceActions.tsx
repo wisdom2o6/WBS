@@ -5,7 +5,7 @@ import { errorMessage } from "../services/workspace";
 import type { Project, Room } from "../types/workspace";
 import { Confirm, Dropdown, useToast } from "./ui";
 import { Icon } from "./Icon";
-import { MenuDivider, MenuItem, PlannedBadge } from "./patterns";
+import { MenuDivider, MenuItem } from "./patterns";
 import { ResourceDialog } from "./ResourceDialog";
 
 /**
@@ -50,7 +50,6 @@ export function useResourceActions(
           <MenuItem
             icon="chat"
             onClick={() => navigate(`${base}${path}/chat`)}
-            badge={<PlannedBadge label="Beta" />}
           >
             Open conversation
           </MenuItem>

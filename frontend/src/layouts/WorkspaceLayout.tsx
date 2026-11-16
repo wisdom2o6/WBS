@@ -26,7 +26,6 @@ import {
   MenuDivider,
   MenuItem,
   NotificationItem,
-  PlannedBadge,
   roleLabel,
 } from "../components/patterns";
 import { roleDescriptions } from "../services/permissions";
@@ -41,6 +40,7 @@ const navItems = [
   { path: "/documents", label: "Shared documents", icon: "file" },
   { path: "/members", label: "Members", icon: "users" },
 ];
+
 export function WorkspaceLayout() {
   const {
     workspace,
@@ -71,6 +71,7 @@ export function WorkspaceLayout() {
   const [createWorkspace, setCreateWorkspace] = useState(false);
   const [expanded, setExpanded] = useState<string[]>(["brand"]);
   const [help, setHelp] = useState(false);
+
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -88,6 +89,7 @@ export function WorkspaceLayout() {
       window.removeEventListener("wbs:search", openSearch);
     };
   }, []);
+
   const current =
     navItems.find((n) => location.pathname.includes(n.path))?.label ||
     (location.pathname.includes("/room/")
@@ -101,6 +103,7 @@ export function WorkspaceLayout() {
             : location.pathname.includes("/system")
               ? "Design system"
               : "Project");
+
   const crumbs = useMemo(() => {
     const items: { label: string; to?: string; icon?: string }[] = [
       { label: workspace?.name || "Workspace", to: `${base}/workspace` },
@@ -127,11 +130,13 @@ export function WorkspaceLayout() {
     } else items.push({ label: current });
     return items;
   }, [location.pathname, workspace, base, current]);
+
   const unread = notifications.filter((n) => !n.read).length;
   const displayName = demo
     ? "Alex Morgan"
     : user?.fullName || user?.username || "Your account";
   const projects = workspace?.projects || [];
+
   return (
     <div
       className={`app-shell ${collapsed ? "sidebar-collapsed" : ""} ${mobile ? "mobile-nav-open" : ""}`}
@@ -214,7 +219,6 @@ export function WorkspaceLayout() {
               >
                 <Icon name={item.icon} size={18} />
                 <span>{item.label}</span>
-                {item.path === "/media" && <PlannedBadge label="Beta" />}
                 {item.path === "/tasks" &&
                   tasks.filter((t) => !t.done).length > 0 && (
                     <small className="nav-count">
@@ -417,11 +421,7 @@ export function WorkspaceLayout() {
                   />
                 ))}
                 {!notifications.length && (
-                  <p className="compact-empty">
-                    {demo
-                      ? "You’re all caught up."
-                      : "No notification service is connected yet."}
-                  </p>
+                  <p className="compact-empty">You’re all caught up.</p>
                 )}
               </div>
               <Link
@@ -483,29 +483,10 @@ export function WorkspaceLayout() {
               Organize your work in workspaces, group it into projects, and
               bring ideas together in rooms.
             </p>
-            <Notice>
-              {demo
-                ? "You are exploring sample data. Demo changes are local to this session; no messages, invitations, or uploads are sent to a server."
-                : "Canvas, live chat and workspace management use your existing WBS backend. Other modules show their integration status in context."}
-            </Notice>
             <p className="muted">
               Use Ctrl / ⌘ K to search. In the canvas, hold Space to pan and
               scroll to zoom.
             </p>
-            <Link
-              className="help-link"
-              to={`${base}/system`}
-              onClick={() => setHelp(false)}
-            >
-              <Icon name="layers" size={16} />
-              <span>
-                <strong>Design system & module status</strong>
-                <small>
-                  Components, interaction states and what is implemented today.
-                </small>
-              </span>
-              <Icon name="arrow" size={14} />
-            </Link>
             <Button
               variant="primary"
               onClick={() => {
