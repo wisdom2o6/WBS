@@ -159,6 +159,21 @@ ALTER TABLE users
 ALTER TABLE projects
     ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id) ON DELETE SET NULL;
 
+ALTER TABLE project_members
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'MEMBER',
+    ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'project_members_role_check'
+    ) THEN
+        ALTER TABLE project_members
+            ADD CONSTRAINT project_members_role_check
+            CHECK (role IN ('OWNER', 'MEMBER', 'VIEWER'));
+    END IF;
+END $$;
+
 ALTER TABLE rooms
     ADD COLUMN IF NOT EXISTS description TEXT;
 
