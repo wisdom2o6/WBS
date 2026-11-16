@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Link,
   useNavigate,
@@ -16,6 +16,7 @@ import {
   Heading,
   IconButton,
   Select,
+  useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { ResourceDialog } from "../components/ResourceDialog";
@@ -34,6 +35,106 @@ import { RoomCard } from "./Dashboard";
 import type { Project } from "../types/workspace";
 
 export { ResourceActions };
+
+type WorkspaceMemberItem = ReturnType<typeof useWorkspace>["members"][number];
+
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+
+function getAuthToken() {
+  return (
+    localStorage.getItem("wbs:token") ||
+    localStorage.getItem("token") ||
+    sessionStorage.getItem("wbs:token") ||
+    ""
+  );
+}
+
+function useProjectMembers(
+  project: Project | undefined,
+  workspaceMembers: WorkspaceMemberItem[],
+  demo: boolean,
+) {
+  const [assigned, setAssigned] = useState<WorkspaceMemberItem[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!project) {
+      setAssigned([]);
+      return;
+    }
+    if (demo) {
+      setAssigned(workspaceMembers);
+      return;
+    }
+
+    const ownerOrCreator = workspaceMembers.filter(
+      (m) =>
+        m.role === "OWNER" ||
+        (project.createdByName && m.fullName === project.createdByName),
+    );
+
+    setLoadingMembers(true);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(
+        `${API_BASE}/api/v1/projects/${project.id}/members`,
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        },
+      );
+      if (!res.ok) {
+        setAssigned(ownerOrCreator);
+        return;
+      }
+      const raw = await res.json();
+      const list: Array<Partial<WorkspaceMemberItem> & { id?: string }> =
+        Array.isArray(raw)
+          ? raw
+          : Array.isArray(raw?.data)
+            ? raw.data
+            : Array.isArray(raw?.members)
+              ? raw.members
+              : [];
+
+      const mapped = list
+        .map((item) => {
+          const uid = item.userId || item.id;
+          const found = workspaceMembers.find(
+            (wm) =>
+              (uid && wm.userId === uid) ||
+              (item.email && wm.email === item.email),
+          );
+          if (found) return found;
+          if (!uid || !item.fullName) return null;
+          return {
+            userId: uid,
+            fullName: item.fullName,
+            email: item.email || "",
+            role: (item.role as WorkspaceMemberItem["role"]) || "MEMBER",
+          } as WorkspaceMemberItem;
+        })
+        .filter((m): m is WorkspaceMemberItem => m !== null);
+
+      const merged = [...ownerOrCreator];
+      for (const m of mapped) {
+        if (!merged.some((existing) => existing.userId === m.userId)) {
+          merged.push(m);
+        }
+      }
+      setAssigned(merged);
+    } catch {
+      setAssigned(ownerOrCreator);
+    } finally {
+      setLoadingMembers(false);
+    }
+  }, [project, workspaceMembers, demo]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return { projectMembers: assigned, loadingMembers, reloadMembers: load };
+}
 
 function formatDate(iso?: string) {
   if (!iso) return "—";
@@ -94,8 +195,9 @@ function WorkspaceHeader() {
 }
 
 function ProjectCard({ project, index }: { project: Project; index: number }) {
-  const { base, members } = useWorkspace();
+  const { base, members, demo } = useWorkspace();
   const { items, dialogs } = useResourceActions("project", project);
+  const { projectMembers } = useProjectMembers(project, members, demo);
   return (
     <>
       <ContextMenu actions={items}>
@@ -137,9 +239,7 @@ function ProjectCard({ project, index }: { project: Project; index: number }) {
             </span>
           </div>
           <div className="project-card-bottom">
-            <Avatars
-              names={members.slice(index, index + 3).map((m) => m.fullName)}
-            />
+            <Avatars names={projectMembers.map((m) => m.fullName)} />
             <Link to={`${base}/projects/${project.id}`} className="text-link">
               Open project
               <Icon name="arrow" size={15} />
@@ -296,16 +396,33 @@ export default function Projects() {
 
 export function ProjectDetail() {
   const { projectId } = useParams();
-  const { workspace, base, members, documents, assets, activity, can, role } =
-    useWorkspace();
+  const {
+    workspace,
+    base,
+    members,
+    documents,
+    assets,
+    activity,
+    can,
+    role,
+    demo,
+  } = useWorkspace();
   const [params, setParams] = useSearchParams();
   const project = workspace?.projects.find((p) => p.id === projectId);
+  const { projectMembers, reloadMembers } = useProjectMembers(
+    project,
+    members,
+    demo,
+  );
   const tab = params.get("tab") || "Rooms";
   const setTab = (t: string) => setParams(t === "Rooms" ? {} : { tab: t });
   const [create, setCreate] = useState(false);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("activity");
+  const [assigningId, setAssigningId] = useState<string | null>(null);
   const navigate = useNavigate();
+  const toast = useToast();
+
   if (!project)
     return (
       <div className="page">
@@ -320,6 +437,68 @@ export function ProjectDetail() {
         />
       </div>
     );
+
+  const handleAssign = async (member: WorkspaceMemberItem) => {
+    if (demo) {
+      toast("Demo workspace: member assignment is simulated.", "info");
+      return;
+    }
+    setAssigningId(member.userId);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(
+        `${API_BASE}/api/v1/projects/${project.id}/members`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            userId: member.userId,
+            email: member.email,
+          }),
+        },
+      );
+      if (!res.ok) throw new Error("Không thể phân công thành viên vào Project.");
+      await reloadMembers();
+      toast(`Đã phân công ${member.fullName} vào ${project.name}.`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Phân công thất bại.", true);
+    } finally {
+      setAssigningId(null);
+    }
+  };
+
+  const handleUnassign = async (member: WorkspaceMemberItem) => {
+    if (demo) return;
+    setAssigningId(member.userId);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(
+        `${API_BASE}/api/v1/projects/${project.id}/members/${member.userId}`,
+        {
+          method: "DELETE",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        },
+      );
+      if (!res.ok) throw new Error("Không thể hủy phân công thành viên.");
+      await reloadMembers();
+      toast(`Đã hủy phân công ${member.fullName} khỏi ${project.name}.`);
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "Hủy phân công thất bại.",
+        true,
+      );
+    } finally {
+      setAssigningId(null);
+    }
+  };
+
+  const unassignedMembers = members.filter(
+    (wm) => !projectMembers.some((pm) => pm.userId === wm.userId),
+  );
+
   const docs = documents.filter((d) => d.projectId === project.id);
   const files = assets.filter((a) => a.projectId === project.id);
   const events = activity.filter(
@@ -348,7 +527,7 @@ export function ProjectDetail() {
     Rooms: project.rooms.length,
     Documents: docs.length,
     Files: files.length,
-    Members: members.length,
+    Members: projectMembers.length,
     Activity: events.length,
   };
   return (
@@ -372,7 +551,7 @@ export function ProjectDetail() {
         <div className="page-heading-actions">
           <ResourceActions kind="project" resource={project} />
           {can.manageMembers && (
-            <Button icon="users" onClick={() => navigate(`${base}/members`)}>
+            <Button icon="users" onClick={() => setTab("Members")}>
               Manage members
             </Button>
           )}
@@ -388,8 +567,11 @@ export function ProjectDetail() {
         </div>
       </div>
       <div className="project-detail-meta">
-        <Avatars names={members.map((m) => m.fullName)} />
-        <span>{members.length} workspace members</span>
+        <Avatars names={projectMembers.map((m) => m.fullName)} />
+        <span>
+          {projectMembers.length}{" "}
+          {projectMembers.length === 1 ? "project member" : "project members"}
+        </span>
         <span>Created by {project.createdByName || "your team"}</span>
         <span>{formatDate(project.createdAt)}</span>
         <RoleBadge role={role} />
@@ -516,24 +698,61 @@ export function ProjectDetail() {
         </div>
       )}
       {tab === "Members" && (
-        <>
-          <p className="section-description">
-            Workspace membership applies to every project. Project-specific
-            permissions are planned and not supported by the current backend.
-          </p>
-          <div className="resource-list">
-            {members.map((m, i) => (
-              <div key={m.userId}>
-                <Avatar name={m.fullName} tone={i} />
-                <span>
-                  <strong>{m.fullName}</strong>
-                  <small>{m.email}</small>
-                </span>
-                <RoleBadge role={m.role} />
-              </div>
-            ))}
+        <div className="project-members-split">
+          <div className="project-members-block">
+            <p className="section-description">
+              Chỉ những thành viên dưới đây mới có quyền truy cập Project{" "}
+              <strong>{project.name}</strong> và các Room bên trong.
+            </p>
+            <div className="resource-list">
+              {projectMembers.map((m, i) => (
+                <div key={m.userId}>
+                  <Avatar name={m.fullName} tone={i} />
+                  <span>
+                    <strong>{m.fullName}</strong>
+                    <small>{m.email}</small>
+                  </span>
+                  <RoleBadge role={m.role} />
+                  {can.manageMembers && m.role !== "OWNER" && (
+                    <Button
+                      variant="ghost"
+                      loading={assigningId === m.userId}
+                      onClick={() => handleUnassign(m)}
+                    >
+                      Hủy phân công
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
-        </>
+
+          {can.manageMembers && unassignedMembers.length > 0 && (
+            <div className="project-members-block">
+              <div className="eyebrow">CHƯA PHÂN CÔNG VÀO PROJECT NÀY</div>
+              <div className="resource-list">
+                {unassignedMembers.map((m, i) => (
+                  <div key={m.userId}>
+                    <Avatar name={m.fullName} tone={i + 2} />
+                    <span>
+                      <strong>{m.fullName}</strong>
+                      <small>{m.email}</small>
+                    </span>
+                    <RoleBadge role={m.role} />
+                    <Button
+                      variant="secondary"
+                      icon="plus"
+                      loading={assigningId === m.userId}
+                      onClick={() => handleAssign(m)}
+                    >
+                      Phân công
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
       {tab === "Activity" &&
         (events.length ? (
@@ -565,6 +784,7 @@ export function ProjectDetail() {
     </div>
   );
 }
+
 export function Rooms() {
   const { workspace, can } = useWorkspace();
   const [query, setQuery] = useState("");

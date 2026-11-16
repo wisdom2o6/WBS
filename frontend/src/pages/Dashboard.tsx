@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
@@ -18,6 +18,136 @@ import { useResourceActions } from "../components/ResourceActions";
 import { LoadingState, RoleBadge } from "../components/patterns";
 import type { Project, Room } from "../types/workspace";
 import { getRecentRooms } from "../services/recentRooms";
+
+type WorkspaceMemberItem = ReturnType<typeof useWorkspace>["members"][number];
+
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const projectMembersCache = new Map<
+  string,
+  { names: string[]; ts: number }
+>();
+const inFlightRequests = new Map<string, Promise<string[]>>();
+
+function getAuthToken() {
+  return (
+    localStorage.getItem("wbs:token") ||
+    localStorage.getItem("token") ||
+    sessionStorage.getItem("wbs:token") ||
+    ""
+  );
+}
+
+function getBaseProjectNames(
+  project: Project,
+  workspaceMembers: WorkspaceMemberItem[],
+) {
+  return workspaceMembers
+    .filter(
+      (m) =>
+        m.role === "OWNER" ||
+        (project.createdByName && m.fullName === project.createdByName),
+    )
+    .map((m) => m.fullName);
+}
+
+async function fetchProjectMemberNames(
+  project: Project,
+  workspaceMembers: WorkspaceMemberItem[],
+): Promise<string[]> {
+  const cached = projectMembersCache.get(project.id);
+  if (cached && Date.now() - cached.ts < 5000) {
+    return cached.names;
+  }
+
+  const existing = inFlightRequests.get(project.id);
+  if (existing) return existing;
+
+  const baseNames = getBaseProjectNames(project, workspaceMembers);
+  const request = (async () => {
+    try {
+      const token = getAuthToken();
+      const res = await fetch(
+        `${API_BASE}/api/v1/projects/${project.id}/members`,
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        },
+      );
+      if (!res.ok) return baseNames;
+
+      const raw = await res.json();
+      const list: Array<{
+        userId?: string;
+        id?: string;
+        fullName?: string;
+        email?: string;
+      }> = Array.isArray(raw)
+        ? raw
+        : Array.isArray(raw?.data)
+          ? raw.data
+          : Array.isArray(raw?.members)
+            ? raw.members
+            : [];
+
+      const merged = [...baseNames];
+      for (const item of list) {
+        const uid = item.userId || item.id;
+        const matched = workspaceMembers.find(
+          (wm) =>
+            (uid && wm.userId === uid) ||
+            (item.email && wm.email === item.email),
+        );
+        const resolvedName = matched?.fullName || item.fullName;
+        if (resolvedName && !merged.includes(resolvedName)) {
+          merged.push(resolvedName);
+        }
+      }
+      projectMembersCache.set(project.id, { names: merged, ts: Date.now() });
+      return merged;
+    } catch {
+      return baseNames;
+    } finally {
+      inFlightRequests.delete(project.id);
+    }
+  })();
+
+  inFlightRequests.set(project.id, request);
+  return request;
+}
+
+function useProjectMemberNames(
+  project: Project,
+  workspaceMembers: WorkspaceMemberItem[],
+  demo: boolean,
+  index = 0,
+) {
+  const [names, setNames] = useState<string[]>(() => {
+    if (demo) {
+      const start = index % Math.max(1, workspaceMembers.length - 2);
+      return workspaceMembers.slice(start, start + 3).map((m) => m.fullName);
+    }
+    return getBaseProjectNames(project, workspaceMembers);
+  });
+
+  useEffect(() => {
+    if (demo) {
+      const start = index % Math.max(1, workspaceMembers.length - 2);
+      setNames(
+        workspaceMembers.slice(start, start + 3).map((m) => m.fullName),
+      );
+      return;
+    }
+    let active = true;
+    setNames(getBaseProjectNames(project, workspaceMembers));
+    fetchProjectMemberNames(project, workspaceMembers).then((resolved) => {
+      if (active) setNames(resolved);
+    });
+    return () => {
+      active = false;
+    };
+  }, [project, workspaceMembers, demo, index]);
+
+  return names;
+}
 
 export function BoardPreview({ variant = 0 }: { variant?: number }) {
   return (
@@ -105,6 +235,7 @@ export function BoardPreview({ variant = 0 }: { variant?: number }) {
     </div>
   );
 }
+
 export function RoomCard({
   room,
   project,
@@ -119,7 +250,7 @@ export function RoomCard({
   const { base, members, demo } = useWorkspace();
   const { items, dialogs } = useResourceActions("room", room);
   const activity = room.lastActivity;
-  const people = members.slice(index % Math.max(1, members.length - 2), (index % Math.max(1, members.length - 2)) + 3);
+  const memberNames = useProjectMemberNames(project, members, demo, index);
   return (
     <div className="room-with-actions">
       <ContextMenu actions={items}>
@@ -157,7 +288,7 @@ export function RoomCard({
                 </span>
               )}
             </span>
-            <Avatars names={people.map((m) => m.fullName)} limit={3} />
+            <Avatars names={memberNames} limit={3} />
           </div>
         </Link>
       </ContextMenu>
@@ -176,6 +307,42 @@ export function RoomCard({
     </div>
   );
 }
+
+function ProjectTableRow({
+  project,
+  index,
+}: {
+  project: Project;
+  index: number;
+}) {
+  const { base, members, demo } = useWorkspace();
+  const memberNames = useProjectMemberNames(project, members, demo, index);
+  return (
+    <Link className="project-table-row" to={`${base}/projects/${project.id}`}>
+      <div className="project-name">
+        <span className={`project-symbol tone-${index % 3}`}>
+          <Icon name="folder" size={19} />
+        </span>
+        <div>
+          <strong>{project.name}</strong>
+          <small>{project.description || "A space for shared work."}</small>
+        </div>
+      </div>
+      <Avatars names={memberNames} limit={3} />
+      <span className="room-number">{project.rooms.length} rooms</span>
+      <span className="muted small-text">
+        {project.createdAt
+          ? new Date(project.createdAt).toLocaleDateString("en", {
+              month: "short",
+              day: "numeric",
+            })
+          : "—"}
+      </span>
+      <Icon name="chevron" size={15} />
+    </Link>
+  );
+}
+
 function shortDate(iso: string) {
   const date = new Date(iso);
   return Number.isNaN(date.getTime())
@@ -187,6 +354,7 @@ function shortDate(iso: string) {
         minute: "2-digit",
       });
 }
+
 export const Dashboard = () => {
   const {
     workspace,
@@ -225,8 +393,10 @@ export const Dashboard = () => {
   const location = (projectId?: string, roomId?: string) => {
     const project = projects.find((p) => p.id === projectId);
     const room = project?.rooms.find((r) => r.id === roomId);
-    return [project?.name, room?.name].filter(Boolean).join(" · ") ||
-      "Workspace document";
+    return (
+      [project?.name, room?.name].filter(Boolean).join(" · ") ||
+      "Workspace document"
+    );
   };
   const quickActions = [
     can.create && {
@@ -423,34 +593,7 @@ export const Dashboard = () => {
             </div>
             {loading && <LoadingState variant="rows" label="Loading projects" />}
             {projects.slice(0, 4).map((p, i) => (
-              <Link
-                className="project-table-row"
-                key={p.id}
-                to={`${base}/projects/${p.id}`}
-              >
-                <div className="project-name">
-                  <span className={`project-symbol tone-${i % 3}`}>
-                    <Icon name="folder" size={19} />
-                  </span>
-                  <div>
-                    <strong>{p.name}</strong>
-                    <small>{p.description || "A space for shared work."}</small>
-                  </div>
-                </div>
-                <Avatars
-                  names={members.slice(i, i + 3).map((m) => m.fullName)}
-                />
-                <span className="room-number">{p.rooms.length} rooms</span>
-                <span className="muted small-text">
-                  {p.createdAt
-                    ? new Date(p.createdAt).toLocaleDateString("en", {
-                        month: "short",
-                        day: "numeric",
-                      })
-                    : "—"}
-                </span>
-                <Icon name="chevron" size={15} />
-              </Link>
+              <ProjectTableRow key={p.id} project={p} index={i} />
             ))}
             {!loading && projects.length === 0 && (
               <div className="compact-empty">

@@ -3701,3 +3701,116 @@ a.summary-stat:hover:after {
     padding-top: 12px;
   }
 }
+
+/* =====================================================================
+   Fixes: Members action column & Project/Room card text wrapping
+   ===================================================================== */
+.members-page .members-table-head,
+.members-page .members-table-row {
+  grid-template-columns: minmax(190px, 1.5fr) 125px 115px minmax(115px, auto) !important;
+  column-gap: 12px;
+}
+
+.members-page .members-table-row > *:last-child {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.members-page .member-name {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.members-page .member-name > span,
+.members-page .member-name > div {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.members-page .member-name strong,
+.members-page .member-name small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .members-page .members-table-head,
+  .members-page .members-table-row {
+    grid-template-columns: minmax(130px, 1fr) 96px minmax(100px, auto) !important;
+    gap: 10px;
+    padding: 14px 12px;
+  }
+}
+
+/* Chống tràn chữ ở thẻ Project, Room và nút Create a room */
+.project-collection > .context-menu-target,
+.project-card,
+.room-grid > *,
+.room-grid > .room-with-actions {
+  min-width: 0;
+}
+
+.project-card {
+  overflow: hidden;
+}
+
+.project-card h3,
+.project-card p {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.project-card-rooms > a {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.create-room-tile {
+  min-width: 0;
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  padding: 24px 18px;
+  flex-direction: column;
+  text-align: center;
+  white-space: normal !important;
+}
+
+.create-room-tile strong,
+.create-room-tile span {
+  white-space: normal !important;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
+  line-height: 1.45;
+}
+
+.resource-list > div > span,
+.resource-list > a > span {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.resource-list > div > span strong,
+.resource-list > div > span small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-members-split {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.project-members-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
