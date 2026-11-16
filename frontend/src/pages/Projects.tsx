@@ -38,15 +38,33 @@ export { ResourceActions };
 
 type WorkspaceMemberItem = ReturnType<typeof useWorkspace>["members"][number];
 
-const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const API_BASE = (
+  import.meta.env.VITE_API_URL || "https://wbs-s6f8.onrender.com"
+).replace(/\/$/, "");
 
-function getAuthToken() {
-  return (
-    localStorage.getItem("wbs:token") ||
+function getAuthToken(): string {
+  const direct =
+    localStorage.getItem("accessToken") ||
+    sessionStorage.getItem("accessToken") ||
     localStorage.getItem("token") ||
-    sessionStorage.getItem("wbs:token") ||
-    ""
-  );
+    sessionStorage.getItem("token") ||
+    localStorage.getItem("wbs_token") ||
+    localStorage.getItem("auth_token");
+  if (direct) return direct;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key) continue;
+    const val = localStorage.getItem(key) || "";
+    if (val.startsWith("eyJ")) return val;
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed?.token === "string") return parsed.token;
+      if (typeof parsed?.accessToken === "string") return parsed.accessToken;
+    } catch {
+      // ignore non-JSON storage values
+    }
+  }
+  return "";
 }
 
 function useProjectMembers(
@@ -104,13 +122,19 @@ function useProjectMembers(
               (uid && wm.userId === uid) ||
               (item.email && wm.email === item.email),
           );
-          if (found) return found;
+          const resolvedRole =
+            (item.role as WorkspaceMemberItem["role"]) ||
+            found?.role ||
+            "MEMBER";
+          if (found) {
+            return { ...found, role: resolvedRole };
+          }
           if (!uid || !item.fullName) return null;
           return {
             userId: uid,
             fullName: item.fullName,
             email: item.email || "",
-            role: (item.role as WorkspaceMemberItem["role"]) || "MEMBER",
+            role: resolvedRole,
           } as WorkspaceMemberItem;
         })
         .filter((m): m is WorkspaceMemberItem => m !== null);
@@ -420,6 +444,9 @@ export function ProjectDetail() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("activity");
   const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [selectedRoles, setSelectedRoles] = useState<
+    Record<string, "MEMBER" | "VIEWER">
+  >({});
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -443,6 +470,7 @@ export function ProjectDetail() {
       toast("Demo workspace: member assignment is simulated.", "info");
       return;
     }
+    const chosenRole = selectedRoles[member.userId] || "MEMBER";
     setAssigningId(member.userId);
     try {
       const token = getAuthToken();
@@ -457,14 +485,48 @@ export function ProjectDetail() {
           body: JSON.stringify({
             userId: member.userId,
             email: member.email,
+            role: chosenRole,
           }),
         },
       );
       if (!res.ok) throw new Error("Không thể phân công thành viên vào Project.");
       await reloadMembers();
-      toast(`Đã phân công ${member.fullName} vào ${project.name}.`);
+      toast(
+        `Đã phân công ${member.fullName} (${chosenRole === "VIEWER" ? "Viewer" : "Member"}) vào ${project.name}.`,
+      );
     } catch (err) {
       toast(err instanceof Error ? err.message : "Phân công thất bại.", true);
+    } finally {
+      setAssigningId(null);
+    }
+  };
+
+  const handleChangeRole = async (
+    member: WorkspaceMemberItem,
+    nextRole: "MEMBER" | "VIEWER",
+  ) => {
+    if (demo) return;
+    setAssigningId(member.userId);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(
+        `${API_BASE}/api/v1/projects/${project.id}/members/${member.userId}/role`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ role: nextRole }),
+        },
+      );
+      if (!res.ok) throw new Error("Không thể cập nhật vai trò trong Project.");
+      await reloadMembers();
+      toast(
+        `Đã chuyển ${member.fullName} sang quyền ${nextRole === "VIEWER" ? "Viewer (chỉ xem)" : "Member"}.`,
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Đổi vai trò thất bại.", true);
     } finally {
       setAssigningId(null);
     }
@@ -712,7 +774,25 @@ export function ProjectDetail() {
                     <strong>{m.fullName}</strong>
                     <small>{m.email}</small>
                   </span>
-                  <RoleBadge role={m.role} />
+                  {can.manageMembers && m.role !== "OWNER" ? (
+                    <Select
+                      aria-label={`Role of ${m.fullName}`}
+                      value={m.role === "VIEWER" ? "VIEWER" : "MEMBER"}
+                      disabled={assigningId === m.userId}
+                      style={{ width: "auto", minWidth: 112, flexShrink: 0 }}
+                      onChange={(e) =>
+                        handleChangeRole(
+                          m,
+                          e.target.value as "MEMBER" | "VIEWER",
+                        )
+                      }
+                    >
+                      <option value="MEMBER">Member</option>
+                      <option value="VIEWER">Viewer</option>
+                    </Select>
+                  ) : (
+                    <RoleBadge role={m.role} />
+                  )}
                   {can.manageMembers && m.role !== "OWNER" && (
                     <Button
                       variant="ghost"
@@ -738,7 +818,21 @@ export function ProjectDetail() {
                       <strong>{m.fullName}</strong>
                       <small>{m.email}</small>
                     </span>
-                    <RoleBadge role={m.role} />
+                    <Select
+                      aria-label={`Assign role for ${m.fullName}`}
+                      value={selectedRoles[m.userId] || "MEMBER"}
+                      disabled={assigningId === m.userId}
+                      style={{ width: "auto", minWidth: 112, flexShrink: 0 }}
+                      onChange={(e) =>
+                        setSelectedRoles((prev) => ({
+                          ...prev,
+                          [m.userId]: e.target.value as "MEMBER" | "VIEWER",
+                        }))
+                      }
+                    >
+                      <option value="MEMBER">Member</option>
+                      <option value="VIEWER">Viewer</option>
+                    </Select>
                     <Button
                       variant="secondary"
                       icon="plus"

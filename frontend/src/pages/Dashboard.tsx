@@ -21,20 +21,39 @@ import { getRecentRooms } from "../services/recentRooms";
 
 type WorkspaceMemberItem = ReturnType<typeof useWorkspace>["members"][number];
 
-const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 const projectMembersCache = new Map<
-  string,
-  { names: string[]; ts: number }
+string,
+{ names: string[]; ts: number }
 >();
 const inFlightRequests = new Map<string, Promise<string[]>>();
 
-function getAuthToken() {
-  return (
-    localStorage.getItem("wbs:token") ||
+const API_BASE = (
+  import.meta.env.VITE_API_URL || "https://wbs-s6f8.onrender.com"
+).replace(/\/$/, "");
+
+function getAuthToken(): string {
+  const direct =
+    localStorage.getItem("accessToken") ||
+    sessionStorage.getItem("accessToken") ||
     localStorage.getItem("token") ||
-    sessionStorage.getItem("wbs:token") ||
-    ""
-  );
+    sessionStorage.getItem("token") ||
+    localStorage.getItem("wbs_token") ||
+    localStorage.getItem("auth_token");
+  if (direct) return direct;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key) continue;
+    const val = localStorage.getItem(key) || "";
+    if (val.startsWith("eyJ")) return val;
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed?.token === "string") return parsed.token;
+      if (typeof parsed?.accessToken === "string") return parsed.accessToken;
+    } catch {
+      // ignore non-JSON storage values
+    }
+  }
+  return "";
 }
 
 function getBaseProjectNames(

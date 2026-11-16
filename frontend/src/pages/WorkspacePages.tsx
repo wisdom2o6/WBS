@@ -33,8 +33,10 @@ const API_BASE = (
 
 function getAuthToken(): string {
   const direct =
-    localStorage.getItem("token") ||
     localStorage.getItem("accessToken") ||
+    sessionStorage.getItem("accessToken") ||
+    localStorage.getItem("token") ||
+    sessionStorage.getItem("token") ||
     localStorage.getItem("wbs_token") ||
     localStorage.getItem("auth_token");
   if (direct) return direct;
@@ -54,7 +56,7 @@ function getAuthToken(): string {
   return "";
 }
 
-async function projectMemberRequest<T = any>(
+async function projectMemberRequest<T = unknown>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
@@ -150,7 +152,7 @@ export function Members() {
         <Notice>
           {demo
             ? "Sample members. Invitations, role changes and removals affect this demo session only; no email is sent."
-            : "Sau khi thêm thành viên vào Workspace, bấm nút Phân công ở từng thành viên để cấp hoặc hủy quyền hoạt động trong từng Project."}
+            : "Sau khi thêm thành viên vào Workspace, bấm nút Phân công ở từng thành viên để cấp quyền (Member hoặc Viewer) trong từng Project."}
         </Notice>
       ) : (
         <PermissionNote role={role}>
@@ -447,8 +449,11 @@ function MemberProjectAssignModal({
   onClose: () => void;
 }) {
   const toast = useToast();
-  const [assignedIds, setAssignedIds] = useState<string[]>([]);
+  const [assignments, setAssignments] = useState<
+    Record<string, "MEMBER" | "VIEWER">
+  >({});
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [assignRole, setAssignRole] = useState<"MEMBER" | "VIEWER">("MEMBER");
   const [loadingInit, setLoadingInit] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -459,13 +464,21 @@ function MemberProjectAssignModal({
     try {
       const results = await Promise.all(
         projects.map(async (p) => {
-          const list = await projectMemberRequest<{ userId: string }[]>(
-            `/api/v1/projects/${p.id}/members`,
-          );
-          return list.some((item) => item.userId === member.userId) ? p.id : null;
+          const list = await projectMemberRequest<
+            { userId: string; role?: string }[]
+          >(`/api/v1/projects/${p.id}/members`);
+          const found = list.find((item) => item.userId === member.userId);
+          if (!found) return null;
+          const normalizedRole: "MEMBER" | "VIEWER" =
+            found.role?.toUpperCase() === "VIEWER" ? "VIEWER" : "MEMBER";
+          return [p.id, normalizedRole] as const;
         }),
       );
-      setAssignedIds(results.filter((id): id is string => id !== null));
+      const next: Record<string, "MEMBER" | "VIEWER"> = {};
+      for (const entry of results) {
+        if (entry) next[entry[0]] = entry[1];
+      }
+      setAssignments(next);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -477,6 +490,7 @@ function MemberProjectAssignModal({
     loadAssignments();
   }, [member.userId]);
 
+  const assignedIds = Object.keys(assignments);
   const unassignedProjects = projects.filter(
     (p) => !assignedIds.includes(p.id),
   );
@@ -492,13 +506,45 @@ function MemberProjectAssignModal({
         `/api/v1/projects/${selectedProjectId}/members`,
         {
           method: "POST",
-          body: JSON.stringify({ userId: member.userId }),
+          body: JSON.stringify({
+            userId: member.userId,
+            email: member.email,
+            role: assignRole,
+          }),
         },
       );
       const proj = projects.find((p) => p.id === selectedProjectId);
-      setAssignedIds((prev) => [...prev, selectedProjectId]);
+      setAssignments((prev) => ({ ...prev, [selectedProjectId]: assignRole }));
       setSelectedProjectId("");
-      toast(`Đã phân công ${member.fullName} vào ${proj?.name || "Project"}.`);
+      toast(
+        `Đã phân công ${member.fullName} (${assignRole === "VIEWER" ? "Viewer" : "Member"}) vào ${proj?.name || "Project"}.`,
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleChangeProjectRole = async (
+    projectId: string,
+    nextRole: "MEMBER" | "VIEWER",
+  ) => {
+    setBusy(true);
+    setError("");
+    try {
+      await projectMemberRequest(
+        `/api/v1/projects/${projectId}/members/${member.userId}/role`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ role: nextRole }),
+        },
+      );
+      const proj = projects.find((p) => p.id === projectId);
+      setAssignments((prev) => ({ ...prev, [projectId]: nextRole }));
+      toast(
+        `Đã chuyển ${member.fullName} sang quyền ${nextRole === "VIEWER" ? "Viewer (chỉ xem)" : "Member"} trong ${proj?.name || "Project"}.`,
+      );
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -515,7 +561,11 @@ function MemberProjectAssignModal({
         { method: "DELETE" },
       );
       const proj = projects.find((p) => p.id === projectId);
-      setAssignedIds((prev) => prev.filter((id) => id !== projectId));
+      setAssignments((prev) => {
+        const copy = { ...prev };
+        delete copy[projectId];
+        return copy;
+      });
       toast(`Đã hủy phân công khỏi ${proj?.name || "Project"}.`);
     } catch (err) {
       setError(errorMessage(err));
@@ -531,18 +581,21 @@ function MemberProjectAssignModal({
     >
       <div className="form-stack">
         <p className="dialog-intro">
-          Chọn Project để cấp quyền hoạt động cho <strong>{member.email}</strong>, hoặc bấm <strong>Hủy</strong> khi thành viên đã hoàn thành công việc.
+          Chọn Project và vai trò (<strong>Member</strong> hoặc{" "}
+          <strong>Viewer</strong>) cho <strong>{member.email}</strong>, hoặc
+          bấm <strong>Hủy</strong> khi thành viên hoàn thành công việc.
         </p>
 
         {error && <Notice tone="error">{error}</Notice>}
 
         <form onSubmit={handleAssign} className="form-stack">
           <Field label="Thêm vào Project">
-            <div style={{ display: "flex", gap: "8px" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <Select
                 aria-label="Chọn Project"
                 value={selectedProjectId}
                 disabled={busy || loadingInit || unassignedProjects.length === 0}
+                style={{ flex: "1 1 180px" }}
                 onChange={(e) => setSelectedProjectId(e.target.value)}
               >
                 <option value="">
@@ -555,6 +608,18 @@ function MemberProjectAssignModal({
                     {p.name}
                   </option>
                 ))}
+              </Select>
+              <Select
+                aria-label="Chọn vai trò trong Project"
+                value={assignRole}
+                disabled={busy || loadingInit || unassignedProjects.length === 0}
+                style={{ width: "auto", minWidth: 112 }}
+                onChange={(e) =>
+                  setAssignRole(e.target.value as "MEMBER" | "VIEWER")
+                }
+              >
+                <option value="MEMBER">Member</option>
+                <option value="VIEWER">Viewer</option>
               </Select>
               <Button
                 type="submit"
@@ -582,6 +647,21 @@ function MemberProjectAssignModal({
                     <strong>{p.name}</strong>
                     {p.description && <small>{p.description}</small>}
                   </div>
+                  <Select
+                    aria-label={`Vai trò trong ${p.name}`}
+                    value={assignments[p.id] || "MEMBER"}
+                    disabled={busy}
+                    style={{ width: "auto", minWidth: 112 }}
+                    onChange={(e) =>
+                      handleChangeProjectRole(
+                        p.id,
+                        e.target.value as "MEMBER" | "VIEWER",
+                      )
+                    }
+                  >
+                    <option value="MEMBER">Member</option>
+                    <option value="VIEWER">Viewer</option>
+                  </Select>
                   <Button
                     disabled={busy}
                     onClick={() => handleUnassign(p.id)}
@@ -615,16 +695,19 @@ export function ProjectMembersModal({
   const { members, can } = useWorkspace();
   const toast = useToast();
   const [assigned, setAssigned] = useState<
-    { userId: string; fullName: string; email: string }[]
+    { userId: string; fullName: string; email: string; role?: string }[]
   >([]);
   const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedRole, setSelectedRole] = useState<"MEMBER" | "VIEWER">(
+    "MEMBER",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const loadAssigned = async () => {
     try {
       const list = await projectMemberRequest<
-        { userId: string; fullName: string; email: string }[]
+        { userId: string; fullName: string; email: string; role?: string }[]
       >(`/api/v1/projects/${projectId}/members`);
       setAssigned(list);
     } catch (err) {
@@ -648,11 +731,12 @@ export function ProjectMembersModal({
 
         {can.manageMembers && (
           <Field label="Phân công thành viên từ Workspace">
-            <div style={{ display: "flex", gap: "8px" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <Select
                 aria-label="Chọn thành viên"
                 value={selectedUserId}
                 disabled={busy || available.length === 0}
+                style={{ flex: "1 1 180px" }}
                 onChange={(e) => setSelectedUserId(e.target.value)}
               >
                 <option value="">-- Chọn thành viên --</option>
@@ -661,6 +745,18 @@ export function ProjectMembersModal({
                     {m.fullName} ({m.email})
                   </option>
                 ))}
+              </Select>
+              <Select
+                aria-label="Chọn vai trò"
+                value={selectedRole}
+                disabled={busy || available.length === 0}
+                style={{ width: "auto", minWidth: 112 }}
+                onChange={(e) =>
+                  setSelectedRole(e.target.value as "MEMBER" | "VIEWER")
+                }
+              >
+                <option value="MEMBER">Member</option>
+                <option value="VIEWER">Viewer</option>
               </Select>
               <Button
                 variant="primary"
@@ -673,7 +769,10 @@ export function ProjectMembersModal({
                       `/api/v1/projects/${projectId}/members`,
                       {
                         method: "POST",
-                        body: JSON.stringify({ userId: selectedUserId }),
+                        body: JSON.stringify({
+                          userId: selectedUserId,
+                          role: selectedRole,
+                        }),
                       },
                     );
                     setSelectedUserId("");
@@ -706,6 +805,45 @@ export function ProjectMembersModal({
                       <small>{a.email}</small>
                     </span>
                   </div>
+                  {can.manageMembers ? (
+                    <Select
+                      aria-label={`Vai trò của ${a.fullName}`}
+                      value={
+                        a.role?.toUpperCase() === "VIEWER" ? "VIEWER" : "MEMBER"
+                      }
+                      disabled={busy}
+                      style={{ width: "auto", minWidth: 112 }}
+                      onChange={async (e) => {
+                        const nextRole = e.target.value as "MEMBER" | "VIEWER";
+                        setBusy(true);
+                        setError("");
+                        try {
+                          await projectMemberRequest(
+                            `/api/v1/projects/${projectId}/members/${a.userId}/role`,
+                            {
+                              method: "PATCH",
+                              body: JSON.stringify({ role: nextRole }),
+                            },
+                          );
+                          await loadAssigned();
+                          toast(`Đã cập nhật vai trò của ${a.fullName}.`);
+                        } catch (err) {
+                          setError(errorMessage(err));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      <option value="MEMBER">Member</option>
+                      <option value="VIEWER">Viewer</option>
+                    </Select>
+                  ) : (
+                    <RoleBadge
+                      role={
+                        a.role?.toUpperCase() === "VIEWER" ? "VIEWER" : "MEMBER"
+                      }
+                    />
+                  )}
                   {can.manageMembers && (
                     <Button
                       disabled={busy}
@@ -934,7 +1072,7 @@ export function Notifications() {
             className={filter === f ? "active" : ""}
             onClick={() => setFilter(f)}
           >
-            {f === "all" ? "All updates" : "Unread"}
+            {f[0].toUpperCase() + f.slice(1)}
           </Button>
         ))}
       </div>

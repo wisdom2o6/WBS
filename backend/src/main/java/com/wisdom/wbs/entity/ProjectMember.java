@@ -2,6 +2,7 @@ package com.wisdom.wbs.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.ZonedDateTime;
 
@@ -27,6 +28,12 @@ public class ProjectMember {
     @JoinColumn(name = "user_id")
     private User user;
 
-    @Column(name = "assigned_at", nullable = false)
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
+    private UserRole role = UserRole.MEMBER;
+
+    @CreationTimestamp
+    @Column(name = "assigned_at", updatable = false)
     private ZonedDateTime assignedAt;
 }
