@@ -365,38 +365,37 @@ export function Members() {
                 placeholder="teammate@company.com"
               />
             </Field>
-            <Field
-              label="Role"
-              hint={
-                demo
-                  ? roleDescriptions[inviteRole === "VIEWER" ? "VIEWER" : "MEMBER"].summary
-                  : "The backend adds new people as Member."
-              }
-            >
-              <div className="role-picker" role="radiogroup" aria-label="Role">
-                {(["MEMBER", "VIEWER"] as const).map((r) => (
-                  <button
-                    type="button"
-                    key={r}
-                    role="radio"
-                    aria-checked={inviteRole === r}
-                    disabled={!demo && r !== "MEMBER"}
-                    className={inviteRole === r ? "active" : ""}
-                    onClick={() => setInviteRole(r)}
-                  >
-                    <Icon name={r === "VIEWER" ? "eye" : "users"} size={15} />
-                    <span>
-                      <strong>{roleLabel(r)}</strong>
-                      <small>{roleDescriptions[r].summary}</small>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </Field>
+            {demo && (
+              <Field
+                label="Role"
+                hint={
+                  roleDescriptions[inviteRole === "VIEWER" ? "VIEWER" : "MEMBER"].summary
+                }
+              >
+                <div className="role-picker" role="radiogroup" aria-label="Role">
+                  {(["MEMBER", "VIEWER"] as const).map((r) => (
+                    <button
+                      type="button"
+                      key={r}
+                      role="radio"
+                      aria-checked={inviteRole === r}
+                      className={inviteRole === r ? "active" : ""}
+                      onClick={() => setInviteRole(r)}
+                    >
+                      <Icon name={r === "VIEWER" ? "eye" : "users"} size={15} />
+                      <span>
+                        <strong>{roleLabel(r)}</strong>
+                        <small>{roleDescriptions[r].summary}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            )}
             <Notice>
               {demo
                 ? "No email is sent. The person is added to this demo session only."
-                : "The backend does not send an invitation email."}
+                : "Sau khi thêm vào Workspace, bạn có thể bấm Phân công để cấp quyền Member hoặc Viewer cho từng Project."}
             </Notice>
             <div className="modal-actions">
               <Button onClick={closeInvite}>Cancel</Button>

@@ -4,6 +4,7 @@ import com.wisdom.wbs.dto.ChatMessageDTO;
 import com.wisdom.wbs.service.RoomService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,12 +20,13 @@ public class RoomController {
     private final RoomService roomService;
 
     @GetMapping("/{roomId}/canvas")
-    public ResponseEntity getCanvasState(@PathVariable UUID roomId) {
+    public ResponseEntity<?> getCanvasState(@PathVariable UUID roomId) {
         String snapshot = roomService.getCanvasSnapshot(roomId);
         return ResponseEntity.ok(Map.of("canvasState", snapshot));
     }
 
     @PostMapping("/{roomId}/canvas/snapshot")
+    @PreAuthorize("@roomSecurity.canEdit(#roomId, authentication.name)")
     public ResponseEntity<Void> saveCanvasState(
             @PathVariable UUID roomId,
             @RequestBody Map<String, String> payload) {

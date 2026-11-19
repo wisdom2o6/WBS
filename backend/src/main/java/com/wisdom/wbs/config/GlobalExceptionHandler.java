@@ -4,8 +4,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-
+import org.springframework.security.access.AccessDeniedException;
 import java.util.Map;
+
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -20,5 +21,14 @@ public class GlobalExceptionHandler {
         e.printStackTrace(); // In stacktrace ra terminal backend để debug
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Map.of("message", e.getMessage() != null ? e.getMessage() : "Internal Server Error"));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity handleAccessDenied(AccessDeniedException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(Map.of(
+                        "error", "Forbidden",
+                        "message", ex.getMessage()
+                ));
     }
 }

@@ -13,6 +13,7 @@ export function CanvasLayers({
   onSelect,
   onSelectGroup,
   onToggle,
+  onToggleGroup,
   onMove,
   onGroup,
   onUngroup,
@@ -27,6 +28,7 @@ export function CanvasLayers({
   onSelect: (id: string, additive: boolean) => void;
   onSelectGroup: (groupId: string) => void;
   onToggle: (shape: Shape, key: "hidden" | "locked") => void;
+  onToggleGroup?: (groupId: string, key: "hidden" | "locked") => void;
   onMove: (dragId: string, targetId: string, after: boolean) => void;
   onGroup: () => void;
   onUngroup: () => void;
@@ -35,7 +37,7 @@ export function CanvasLayers({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [expanded, setExpanded] = useState<string[]>([]);
   const [drag, setDrag] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ id: string; after: boolean } | null>(
     null,
@@ -115,20 +117,26 @@ export function CanvasLayers({
   };
   const items: ReactNode[] = [];
   const seen = new Set<string>();
+  let topLevelCount = 0;
   for (const s of filtered) {
     if (!s.groupId || query) {
+      topLevelCount++;
       items.push(row(s));
       continue;
     }
     if (seen.has(s.groupId)) continue;
     seen.add(s.groupId);
+    topLevelCount++;
     const members = filtered.filter((m) => m.groupId === s.groupId);
-    const open = !collapsed.includes(s.groupId);
+    const open = expanded.includes(s.groupId);
     const groupActive = members.every((m) => selectedIds.includes(m.id));
+    const allHidden = members.every((m) => m.hidden);
+    const allLocked = members.every((m) => m.locked);
+    const isSketchGroup = members.every((m) => m.type === "FREEHAND");
     items.push(
       <div
         key={`group-${s.groupId}`}
-        className={`canvas-layer-group ${groupActive ? "active" : ""}`}
+        className={`canvas-layer-group ${groupActive ? "active" : ""} ${allHidden ? "layer-hidden" : ""}`}
       >
         <button
           type="button"
@@ -136,20 +144,36 @@ export function CanvasLayers({
           aria-expanded={open}
           aria-label={`${open ? "Collapse" : "Expand"} group`}
           onClick={() =>
-            setCollapsed((prev) =>
+            setExpanded((prev) =>
               open
-                ? [...prev, s.groupId!]
-                : prev.filter((g) => g !== s.groupId),
+                ? prev.filter((g) => g !== s.groupId)
+                : [...prev, s.groupId!],
             )
           }
         >
           <Icon name={open ? "down" : "chevron"} size={11} />
         </button>
         <Button variant="ghost" onClick={() => onSelectGroup(s.groupId!)}>
-          <Icon name="group" size={13} />
-          <span>Group</span>
+          <Icon name={isSketchGroup ? "pen" : "group"} size={13} />
+          <span>{isSketchGroup ? "Drawing" : "Group"}</span>
           <small>{members.length}</small>
         </Button>
+        {!readOnly && onToggleGroup && (
+          <>
+            <IconButton
+              icon={allHidden ? "eyeoff" : "eye"}
+              label={`${allHidden ? "Show" : "Hide"} group`}
+              className={allHidden ? "persist" : ""}
+              onClick={() => onToggleGroup(s.groupId!, "hidden")}
+            />
+            <IconButton
+              icon={allLocked ? "lock" : "unlock"}
+              label={`${allLocked ? "Unlock" : "Lock"} group`}
+              className={allLocked ? "persist" : ""}
+              onClick={() => onToggleGroup(s.groupId!, "locked")}
+            />
+          </>
+        )}
       </div>,
     );
     if (open) members.forEach((m) => items.push(row(m, true)));
@@ -158,7 +182,7 @@ export function CanvasLayers({
     <aside className="canvas-layers" aria-label="Layers">
       <div className="canvas-panel-heading">
         <strong>Layers</strong>
-        <Badge>{shapes.length}</Badge>
+        <Badge>{topLevelCount}</Badge>
         <IconButton
           icon="close"
           label="Close layers panel"

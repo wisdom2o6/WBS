@@ -2,21 +2,27 @@ package com.wisdom.wbs.controller;
 
 import com.wisdom.wbs.dto.CanvasDrawEvent;
 import com.wisdom.wbs.dto.ChatMessageEvent;
+import com.wisdom.wbs.security.RoomPermissionService;
 import com.wisdom.wbs.service.CanvasPersistenceService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.messaging.handler.annotation.DestinationVariable;
+import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.messaging.simp.annotation.SendToUser;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Controller;
 
 import java.security.Principal;
 import java.util.Map;
+import java.util.UUID;
 
 @Controller
 @RequiredArgsConstructor
 public class CanvasRealtimeController {
 
+    private final RoomPermissionService roomPermissionService;
     private final SimpMessagingTemplate messagingTemplate;
     private final CanvasPersistenceService canvasPersistenceService;
 
@@ -24,11 +30,16 @@ public class CanvasRealtimeController {
     public void handleDrawEvent(@DestinationVariable String roomId,
                                 @Payload CanvasDrawEvent event,
                                 Principal principal) {
-        if (principal != null) {
-            event.setSenderUsername(principal.getName());
+        if (principal == null) {
+            throw new AccessDeniedException("Unauthenticated WebSocket session");
         }
+
+        // Chặn ngay nếu user chỉ có role VIEWER (không lưu DB, không broadcast)
+        roomPermissionService.assertCanEdit(UUID.fromString(roomId), principal.getName());
+
+        event.setSenderUsername(principal.getName());
         event.setRoomId(roomId);
-        
+
         // 1. Lưu hoặc Cập nhật/Xóa vào PostgreSQL
         canvasPersistenceService.saveOrUpdateEvent(event);
 
@@ -38,8 +49,8 @@ public class CanvasRealtimeController {
 
     @MessageMapping("/room.{roomId}.cursor")
     public void handleCursorEvent(@DestinationVariable String roomId,
-                                    @Payload Map<String, Object> cursorData,
-                                    Principal principal) {
+                                  @Payload Map<String, Object> cursorData,
+                                  Principal principal) {
         if (principal != null) {
             cursorData.put("username", principal.getName());
         }
@@ -49,16 +60,24 @@ public class CanvasRealtimeController {
 
     @MessageMapping("/room.{roomId}.chat")
     public void handleChatMessage(@DestinationVariable String roomId,
-                                @Payload ChatMessageEvent chatMessage,
-                                Principal principal) {
+                                  @Payload ChatMessageEvent chatMessage,
+                                  Principal principal) {
         if (principal != null) {
             chatMessage.setSenderUsername(principal.getName());
         }
         chatMessage.setRoomId(roomId);
         chatMessage.setTimestamp(java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")));
-        
+
         // Broadcast tin nhắn chat đến tất cả thành viên trong room
         messagingTemplate.convertAndSend("/topic/room." + roomId + ".chat", chatMessage);
     }
 
+    @MessageExceptionHandler(AccessDeniedException.class)
+    @SendToUser("/queue/errors")
+    public Map<String, String> handleWsAccessDenied(AccessDeniedException ex) {
+        return Map.of(
+                "code", "FORBIDDEN_VIEWER",
+                "message", ex.getMessage()
+        );
+    }
 }

@@ -374,11 +374,19 @@ function initialDemoShapes(): Shape[] {
 export const RoomCanvas: React.FC<{
   view?: "canvas" | "chat";
   isActive?: boolean;
-}> = ({ view = "canvas", isActive = true }) => {
+  readOnly?: boolean;
+  effectiveRole?: "OWNER" | "ADMIN" | "MEMBER" | "EDITOR" | "VIEWER";
+}> = ({
+  view = "canvas",
+  isActive = true,
+  readOnly: readOnlyProp = false,
+  effectiveRole: effectiveRoleProp,
+}) => {
   const { roomId } = useParams<{ roomId: string }>();
   const { token, user } = useAuth();
   const { demo, assets, workspace, can, role, members } = useWorkspace();
-  const readOnly = !can.edit;
+  const readOnly = readOnlyProp || !can.edit;
+  const effectiveRole = effectiveRoleProp || role;
   const toast = useToast();
   const location = useLocation();
   const navigate = useNavigate();
@@ -401,6 +409,8 @@ export const RoomCanvas: React.FC<{
   );
   const [isMouseDown, setIsMouseDown] = useState(false);
   const drawingId = useRef<string | null>(null);
+  const freehandGroupId = useRef<string | null>(null);
+  const lastFreehandId = useRef<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -536,6 +546,10 @@ export const RoomCanvas: React.FC<{
   );
   const setTool = (t: Tool) => {
     if (readOnly && t !== "SELECT" && t !== "HAND") return;
+    if (t !== "FREEHAND") {
+      freehandGroupId.current = null;
+      lastFreehandId.current = null;
+    }
     setToolState(t);
     setSelectedId(null);
     setMultiIds([]);
@@ -552,6 +566,16 @@ export const RoomCanvas: React.FC<{
   const setReadout = (text: string) => {
     if (readoutRef.current) readoutRef.current.textContent = text;
   };
+  useEffect(() => {
+    if (readOnly) {
+      freehandGroupId.current = null;
+      lastFreehandId.current = null;
+      setToolState("SELECT");
+      setEditing(null);
+      setClearOpen(false);
+      setLibraryOpen(false);
+    }
+  }, [readOnly]);
   const recordHistory = () => {
     past.current = [
       ...past.current.slice(-49),
@@ -1041,6 +1065,7 @@ export const RoomCanvas: React.FC<{
   };
 
   const broadcastEvent = (eventType: string, payload: any) => {
+    if (readOnly) return;
     if (payload.id) {
       editedIds.current.add(payload.id);
       if (!replaying.current) past.current.at(-1)?.affectedIds.add(payload.id);
@@ -1320,14 +1345,40 @@ export const RoomCanvas: React.FC<{
     drawingId.current = newId;
 
     if (tool === "FREEHAND") {
+      const prevStrokeId = lastFreehandId.current;
+      const prevExists =
+        prevStrokeId && shapes.some((s) => s.id === prevStrokeId);
+      let gid = freehandGroupId.current;
+
+      if (prevExists) {
+        if (!gid) {
+          gid = crypto.randomUUID();
+          freehandGroupId.current = gid;
+        }
+        const prevShape = shapes.find((s) => s.id === prevStrokeId);
+        if (prevShape && !prevShape.groupId) {
+          const updatedPrev = { ...prevShape, groupId: gid };
+          broadcastEvent("UPDATE", updatedPrev);
+        }
+      } else {
+        gid = null;
+        freehandGroupId.current = null;
+      }
+
+      lastFreehandId.current = newId;
       setShapes((prev) => [
-        ...prev,
+        ...(gid && prevExists
+          ? prev.map((s) =>
+              s.id === prevStrokeId && !s.groupId ? { ...s, groupId: gid } : s,
+            )
+          : prev),
         {
           id: newId,
           type: "FREEHAND",
           points: [pos.x, pos.y],
           color,
           strokeWidth,
+          ...(gid ? { groupId: gid } : {}),
         },
       ]);
     } else if (tool === "RECTANGLE" || tool === "FRAME" || tool === "SECTION") {
@@ -1699,6 +1750,23 @@ export const RoomCanvas: React.FC<{
       setMultiIds([]);
     }
   };
+  const toggleGroup = (groupId: string, key: "hidden" | "locked") => {
+    const targets = shapes.filter((s) => s.groupId === groupId);
+    if (!targets.length || readOnly) return;
+    const value = !targets.every((s) => s[key]);
+    recordHistory();
+    const next = shapes.map((s) =>
+      s.groupId === groupId ? { ...s, [key]: value } : s,
+    );
+    setShapes(next);
+    next
+      .filter((s) => s.groupId === groupId)
+      .forEach((s) => broadcastEvent("UPDATE", s));
+    if (key === "hidden" && value) {
+      setSelectedId(null);
+      setMultiIds([]);
+    }
+  };
   const applySnapshot = (entry: HistoryEntry) => {
     // Restore only locally affected objects, not unrelated concurrent additions.
     const next = shapes.flatMap((s) => {
@@ -2048,7 +2116,7 @@ export const RoomCanvas: React.FC<{
       if (e.key === "Escape") {
         setSelectedId(null);
         setMultiIds([]);
-        setToolState("SELECT");
+        setTool("SELECT");
         return;
       }
       if (readOnly) {
@@ -2300,7 +2368,7 @@ export const RoomCanvas: React.FC<{
           typingUsers={typingUsers}
           onTyping={handleTyping}
           readOnly={readOnly}
-          role={role}
+          role={effectiveRole}
         />
       )}
       <div
@@ -2393,7 +2461,7 @@ export const RoomCanvas: React.FC<{
               You’re viewing this canvas. Editing requires the Member role or
               higher.
             </span>
-            <RoleBadge role={role} />
+            <RoleBadge role={effectiveRole} />
           </div>
         )}
         {!demo && conn === "reconnecting" && (
@@ -2446,6 +2514,7 @@ export const RoomCanvas: React.FC<{
                 setShapes((prev) => prev.map((p) => (p.id === s.id ? next : p)));
                 broadcastEvent("UPDATE", next);
               }}
+              onToggleGroup={toggleGroup}
               onMove={moveLayer}
               onGroup={groupSelection}
               onUngroup={ungroupSelection}
