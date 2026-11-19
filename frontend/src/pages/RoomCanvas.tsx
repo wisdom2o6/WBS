@@ -1601,11 +1601,12 @@ export const RoomCanvas: React.FC<{
     const updatedShape = { ...shape, x: e.target.x(), y: e.target.y() };
     const dx = updatedShape.x - (shape.x || 0),
       dy = updatedShape.y - (shape.y || 0);
+    const activeIds = selectionIds.includes(shape.id)
+      ? selectionIds
+      : [shape.id];
     const moved = shapes
       .filter(
-        (s) =>
-          s.id === shape.id ||
-          (shape.groupId && s.groupId === shape.groupId && !s.locked),
+        (s) => s.id === shape.id || (activeIds.includes(s.id) && !s.locked),
       )
       .map((s) =>
         s.id === shape.id
@@ -1698,12 +1699,18 @@ export const RoomCanvas: React.FC<{
           ? base.filter((x) => x !== id)
           : Array.from(new Set([...base, id]));
       });
-    else
+    else {
+      const members = shape?.groupId
+        ? shapes.filter((s) => s.groupId === shape.groupId)
+        : [];
+      const isFreehandSketch =
+        members.length > 0 && members.every((s) => s.type === "FREEHAND");
       setMultiIds(
-        shape?.groupId
-          ? shapes.filter((s) => s.groupId === shape.groupId).map((s) => s.id)
+        members.length > 1 && !isFreehandSketch
+          ? members.map((s) => s.id)
           : [],
       );
+    }
   };
   const selectGroup = (groupId: string) => {
     const ids = shapes.filter((s) => s.groupId === groupId).map((s) => s.id);
